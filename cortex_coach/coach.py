@@ -1304,7 +1304,7 @@ def compute_spec_coverage(
 
 
 def git_dirty_files(project_dir: Path) -> tuple[list[str], str | None]:
-    cmd = ["git", "-C", str(project_dir), "status", "--porcelain"]
+    cmd = ["git", "-C", str(project_dir), "status", "--porcelain", "--untracked-files=all"]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout).strip() or "git status failed"
@@ -1912,6 +1912,124 @@ def decision_capture_project(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def reflection_scaffold_project(args: argparse.Namespace) -> int:
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+
+    title = args.title.strip()
+    mistake = args.mistake.strip()
+    pattern = args.pattern.strip()
+    rule = args.rule.strip()
+    decision_text = args.decision.strip()
+    rationale = args.rationale.strip()
+
+    impact_scope = parse_csv_list(args.impact_scope)
+    if not impact_scope:
+        impact_scope = ["governance", "workflow"]
+
+    explicit_links = [normalize_repo_rel_path(x) for x in parse_csv_list(args.linked_artifacts)]
+    auto_links: list[str] = []
+
+    if not args.no_auto_link_governance_dirty:
+        files, err = git_dirty_files(project_dir)
+        if err is None:
+            normalized = sorted({normalize_repo_rel_path(f) for f in files if f.strip()})
+            impact = [
+                path for path in normalized if any(fnmatch(path, pat) for pat in DEFAULT_DECISION_GAP_PATTERNS)
+            ]
+            if not args.strict_generated:
+                generated = [
+                    path for path in impact if _is_generated_audit_delta(project_dir, cortex_dir, path)
+                ]
+                impact = [path for path in impact if path not in generated]
+            auto_links = sorted(impact)
+
+    combined_links = sorted(set(explicit_links + auto_links))
+
+    if not decision_text:
+        parts: list[str] = []
+        if mistake:
+            parts.append(f"Mistake observed: {mistake}")
+        if pattern:
+            parts.append(f"Recurring pattern: {pattern}")
+        if rule:
+            parts.append(f"Adopt reusable rule: {rule}")
+        if not parts:
+            parts.append("Capture this governance-relevant learning as a reusable operating rule.")
+        decision_text = " ".join(parts)
+
+    if not rationale:
+        rationale = "Promote durable, auditable learning so repeated mistakes are prevented across sessions."
+
+    suggested_artifact = next_versioned_decision_path(project_dir, slugify(title), cortex_dir=cortex_dir)
+    try:
+        suggested_artifact_rel = str(suggested_artifact.relative_to(project_dir))
+    except ValueError:
+        suggested_artifact_rel = str(suggested_artifact)
+
+    impact_scope_csv = ",".join(impact_scope)
+    linked_csv = ",".join(combined_links)
+
+    capture_cmd = (
+        f'cortex-coach decision-capture --project-dir {project_dir} --title "{title}" '
+        f'--decision "{decision_text}" --rationale "{rationale}" --impact-scope {impact_scope_csv}'
+    )
+    if linked_csv:
+        capture_cmd += f" --linked-artifacts {linked_csv}"
+
+    report = {
+        "version": "v0",
+        "run_at": utc_now(),
+        "project_dir": str(project_dir),
+        "cortex_root": str(cortex_dir),
+        "title": title,
+        "mistake": mistake,
+        "pattern": pattern,
+        "rule": rule,
+        "suggested_decision": decision_text,
+        "suggested_rationale": rationale,
+        "impact_scope": impact_scope,
+        "explicit_linked_artifacts": explicit_links,
+        "auto_linked_governance_files": auto_links,
+        "suggested_linked_artifacts": combined_links,
+        "suggested_decision_artifact": suggested_artifact_rel,
+        "validation_checklist": [
+            "Run decision-capture with reflected decision/rationale and linked artifacts.",
+            "Promote candidate with decision-promote after review.",
+            "Run decision-gap-check and confirm no uncovered governance-impact files.",
+            "Run audit (cortex-only or all based on workflow) before closeout.",
+        ],
+        "recommended_commands": [
+            capture_cmd,
+            "cortex-coach decision-list --project-dir <path> --status candidate",
+            "cortex-coach decision-promote --project-dir <path> --decision-id <decision_id>",
+            "cortex-coach decision-gap-check --project-dir <path>",
+            "cortex-coach audit --project-dir <path>",
+        ],
+    }
+
+    if args.format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"title: {report['title']}")
+        print(f"impact_scope: {','.join(report['impact_scope'])}")
+        print(f"suggested_decision_artifact: {report['suggested_decision_artifact']}")
+        print(f"suggested_linked_artifacts: {len(report['suggested_linked_artifacts'])}")
+        for rel in report["suggested_linked_artifacts"]:
+            print(f"- {rel}")
+        print("recommended_commands:")
+        for cmd in report["recommended_commands"]:
+            print(f"- {cmd}")
+
+    if args.out_file:
+        out = Path(args.out_file)
+        if not out.is_absolute():
+            out = project_dir / out
+        atomic_write_text(out, json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+    return 0
+
 def decision_list_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     payload = load_decision_candidates(project_dir)
@@ -2470,6 +2588,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_decision_capture.add_argument("--format", choices=["text", "json"], default="text")
     add_lock_args(p_decision_capture)
     p_decision_capture.set_defaults(func=decision_capture_project)
+
+    p_reflection_scaffold = sub.add_parser(
+        "reflection-scaffold",
+        help="Scaffold reflection outputs into decision-capture/promotion inputs.",
+    )
+    p_reflection_scaffold.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_reflection_scaffold)
+    p_reflection_scaffold.add_argument("--title", required=True, help="Decision title for the reflection outcome.")
+    p_reflection_scaffold.add_argument("--mistake", default="", help="Concrete mistake instance to reflect on.")
+    p_reflection_scaffold.add_argument("--pattern", default="", help="Abstracted recurring pattern.")
+    p_reflection_scaffold.add_argument("--rule", default="", help="Generalized reusable rule.")
+    p_reflection_scaffold.add_argument("--decision", default="", help="Optional explicit decision statement override.")
+    p_reflection_scaffold.add_argument("--rationale", default="", help="Optional explicit rationale override.")
+    p_reflection_scaffold.add_argument(
+        "--impact-scope",
+        default="governance,workflow",
+        help="Comma-separated impacted domains/artifacts (default: governance,workflow).",
+    )
+    p_reflection_scaffold.add_argument(
+        "--linked-artifacts",
+        default="",
+        help="Comma-separated project-relative artifacts to include in scaffold output.",
+    )
+    p_reflection_scaffold.add_argument(
+        "--no-auto-link-governance-dirty",
+        action="store_true",
+        help="Disable auto-including governance-impacting dirty files in linked artifacts.",
+    )
+    p_reflection_scaffold.add_argument(
+        "--strict-generated",
+        action="store_true",
+        help="Include generated audit bookkeeping deltas when auto-linking dirty files.",
+    )
+    p_reflection_scaffold.add_argument("--format", choices=["text", "json"], default="text")
+    p_reflection_scaffold.add_argument("--out-file")
+    p_reflection_scaffold.set_defaults(func=reflection_scaffold_project)
 
     p_decision_list = sub.add_parser(
         "decision-list",

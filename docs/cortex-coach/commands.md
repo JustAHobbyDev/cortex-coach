@@ -251,6 +251,32 @@ cortex-coach decision-capture \
 Writes/updates:
 - `.cortex/reports/decision_candidates_v0.json`
 
+## `reflection-scaffold`
+
+Scaffold reflection outcomes into decision-ready metadata and command sequence.
+
+```bash
+cortex-coach reflection-scaffold \
+  --project-dir /path/to/project \
+  --title "Require reflection for repeated governance misses" \
+  --mistake "Forgot to promote governance decision before closeout." \
+  --pattern "Reflection was ad hoc and not encoded." \
+  --rule "Run reflection scaffold before closeout when governance files are touched." \
+  --format json
+```
+
+Useful options:
+- `--linked-artifacts a,b,c`: explicitly include artifact paths
+- `--no-auto-link-governance-dirty`: disable automatic inclusion of governance-impacting dirty files
+- `--strict-generated`: include generated audit deltas when auto-linking dirty files
+- `--out-file <path>`: persist scaffold report
+
+Outputs include:
+- suggested decision statement/rationale
+- suggested decision artifact path
+- suggested linked artifacts (explicit + auto-linked governance dirty files)
+- validation checklist and recommended follow-up commands
+
 ## `decision-list`
 
 List decision candidates or promoted decisions.
