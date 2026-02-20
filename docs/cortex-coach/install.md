@@ -4,21 +4,13 @@
 
 - Python 3.10+
 - `uv` (recommended)
-- `just` (recommended for task shortcuts)
 
-## From Source (Current Recommended)
+## Install Standalone CLI (Recommended)
 
-Clone the repository:
-
-```bash
-git clone https://github.com/JustAHobbyDev/cortex.git
-cd cortex
-```
-
-Install the CLI:
+Install latest release:
 
 ```bash
-uv pip install -e .
+uv tool install git+https://github.com/JustAHobbyDev/cortex-coach.git
 ```
 
 Run:
@@ -27,16 +19,31 @@ Run:
 cortex-coach --help
 ```
 
-## No-Install Run Mode (Fallback)
-
-If you do not want to install, run directly from repo root:
+## Install Specific Version
 
 ```bash
-uv run python3 scripts/cortex_project_coach_v0.py --help
+uv tool install git+https://github.com/JustAHobbyDev/cortex-coach.git@v0.1.0
 ```
 
-Or use `just` recipes:
+## Pip Fallback
 
 ```bash
-just --list
+pip install git+https://github.com/JustAHobbyDev/cortex-coach.git@v0.1.0
+```
+
+## From Source (Development)
+
+```bash
+git clone https://github.com/JustAHobbyDev/cortex-coach.git
+cd cortex-coach
+uv sync --group dev
+uv run cortex-coach --help
+```
+
+## Script Mode (Fallback)
+
+If needed, run directly from the local repo:
+
+```bash
+uv run python3 cortex_coach/coach.py --help
 ```
