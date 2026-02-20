@@ -475,13 +475,17 @@ def repo_root_from_script() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def package_assets_root() -> Path:
+    return Path(__file__).resolve().parent / "data" / "assets"
+
+
 def resolve_assets_dir(raw_assets_dir: str | None) -> Path:
     if raw_assets_dir:
         return Path(raw_assets_dir).resolve()
     env_assets = os.environ.get("CORTEX_ASSETS_DIR")
     if env_assets:
         return Path(env_assets).resolve()
-    return repo_root_from_script()
+    return package_assets_root().resolve()
 
 
 def resolve_asset_path(assets_dir: Path, rel_path: str) -> Path:
@@ -616,8 +620,8 @@ Tasks:
     )
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compile DSL to JSON via existing compiler.
-    repo_root = repo_root_from_script()
+    # Compile DSL to JSON via bundled compiler.
+    compiler_path = Path(__file__).resolve().parent / "design_prompt_dsl_compile.py"
     dsl_path = artifacts_dir / f"design_{project_id}_v0.dsl"
     json_path = artifacts_dir / f"design_{project_id}_v0.json"
     vocab_path = resolve_asset_path(assets_dir, "templates/modern_web_design_vocabulary_v0.json")
@@ -629,7 +633,7 @@ Tasks:
         return 1
     compile_cmd = [
         sys.executable,
-        str(repo_root / "scripts" / "design_prompt_dsl_compile_v0.py"),
+        str(compiler_path),
         "--dsl-file",
         str(dsl_path),
         "--out-file",
@@ -1637,8 +1641,7 @@ def audit_needed_project(args: argparse.Namespace) -> int:
 
 def context_load_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
-    repo_root = repo_root_from_script()
-    loader = repo_root / "scripts" / "agent_context_loader_v0.py"
+    loader = Path(__file__).resolve().parent / "agent_context_loader.py"
     if not loader.exists():
         print(f"missing loader script: {loader}", file=sys.stderr)
         return 1
@@ -2091,7 +2094,7 @@ def coach_project(args: argparse.Namespace) -> int:
             {
                 "step": "Compile design DSL into ontology JSON",
                 "target": manifest_obj.get("artifacts", {}).get("design_json", ".cortex/artifacts/design_<id>_v0.json"),
-                "instruction": "Update DSL and compile using scripts/design_prompt_dsl_compile_v0.py, then revalidate.",
+                "instruction": "Update DSL and compile using cortex_coach/design_prompt_dsl_compile.py, then revalidate.",
             }
         )
 

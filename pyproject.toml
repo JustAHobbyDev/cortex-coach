@@ -25,3 +25,9 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["cortex_coach*"]
+
+[tool.setuptools.package-data]
+"cortex_coach" = [
+  "data/assets/contracts/*.json",
+  "data/assets/templates/*.json",
+]

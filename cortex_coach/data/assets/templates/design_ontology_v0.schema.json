@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cortex.local/templates/design_ontology_v0.schema.json",
+  "title": "Design Ontology Spec v0",
+  "description": "Schema for visual-to-language-to-spec design artifacts.",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "layout",
+    "typography",
+    "surface",
+    "motion",
+    "influence"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{2,63}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^v[0-9]+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "product_type": {
+          "type": "string"
+        },
+        "audience": {
+          "type": "string"
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          },
+          "maxItems": 12
+        }
+      }
+    },
+    "layout": {
+      "$ref": "#/$defs/layout"
+    },
+    "typography": {
+      "$ref": "#/$defs/typography"
+    },
+    "surface": {
+      "$ref": "#/$defs/surface"
+    },
+    "motion": {
+      "$ref": "#/$defs/motion"
+    },
+    "influence": {
+      "$ref": "#/$defs/influence"
+    },
+    "composition": {
+      "$ref": "#/$defs/composition"
+    },
+    "quality_targets": {
+      "$ref": "#/$defs/quality_targets"
+    }
+  },
+  "$defs": {
+    "layout": {
+      "type": "object",
+      "required": [
+        "grid",
+        "spacing",
+        "structure"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "grid": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "spacing": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "density": {
+          "type": "string",
+          "enum": [
+            "airy",
+            "balanced",
+            "dense"
+          ]
+        },
+        "rhythm": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "structure": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "narrative_flow": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        }
+      }
+    },
+    "typography": {
+      "type": "object",
+      "required": [
+        "hero",
+        "body"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "hero": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "body": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6
+        },
+        "scale": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "weight_strategy": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "tracking_strategy": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        }
+      }
+    },
+    "surface": {
+      "type": "object",
+      "required": [
+        "base",
+        "accent"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "accent": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "panels": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "depth_model": {
+          "type": "string",
+          "enum": [
+            "flat",
+            "layered",
+            "glass",
+            "hybrid"
+          ]
+        },
+        "shadows": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "textures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8
+        }
+      }
+    },
+    "motion": {
+      "type": "object",
+      "required": [
+        "scroll",
+        "hover"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scroll": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "hover": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "timing_profile": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "interaction_signatures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8
+        },
+        "reduced_motion_strategy": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        }
+      }
+    },
+    "influence": {
+      "type": "object",
+      "required": [
+        "primary"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "primary": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "secondary": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "style_cluster": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "anti_patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8
+        }
+      }
+    },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inherits_from": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{2,63}$"
+          },
+          "maxItems": 6
+        },
+        "overrides": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "layout",
+              "typography",
+              "surface",
+              "motion",
+              "influence",
+              "quality_targets"
+            ]
+          },
+          "uniqueItems": true,
+          "maxItems": 6
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/variant"
+          },
+          "maxItems": 10
+        }
+      }
+    },
+    "variant": {
+      "type": "object",
+      "required": [
+        "name",
+        "changes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{1,31}$"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 120
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      }
+    },
+    "quality_targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clarity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "novelty": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "usability": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "brand_fit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      }
+    }
+  }
+}

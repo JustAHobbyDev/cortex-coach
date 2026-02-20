@@ -1,0 +1,24 @@
+{
+  "version": "v0",
+  "asset_contract_version": "v0",
+  "description": "Minimum Cortex Coach asset contract expected in a target project.",
+  "required_paths": [
+    ".cortex/manifest_v0.json",
+    ".cortex/spec_registry_v0.json",
+    ".cortex/artifacts",
+    ".cortex/prompts",
+    ".cortex/reports"
+  ],
+  "required_manifest": {
+    "version": "v0",
+    "required_top_level_keys": [
+      "version",
+      "project_id",
+      "project_name",
+      "created_at",
+      "updated_at",
+      "phases",
+      "artifacts"
+    ]
+  }
+}

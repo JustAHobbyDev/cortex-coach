@@ -1,0 +1,368 @@
+{
+  "version": "v0",
+  "title": "Modern Web Design Vocabulary",
+  "description": "Categorized design language tokens mapped to the design ontology schema.",
+  "token_count": 60,
+  "tokens": [
+    {
+      "token": "12-column asymmetric grid",
+      "category": "layout_grid",
+      "maps_to": "layout.grid",
+      "definition": "A 12-column system with uneven content weighting to create directional focus."
+    },
+    {
+      "token": "modular card grid",
+      "category": "layout_grid",
+      "maps_to": "layout.grid",
+      "definition": "A repeatable card lattice with consistent gutters and row cadence."
+    },
+    {
+      "token": "split-screen hero",
+      "category": "layout_grid",
+      "maps_to": "layout.structure",
+      "definition": "Hero section divided into two dominant zones, typically message and visual."
+    },
+    {
+      "token": "single-column editorial rail",
+      "category": "layout_grid",
+      "maps_to": "layout.grid",
+      "definition": "One primary text rail optimized for long-form narrative scanning."
+    },
+    {
+      "token": "offset content axis",
+      "category": "layout_grid",
+      "maps_to": "layout.rhythm",
+      "definition": "Deliberate horizontal misalignment that creates tension and visual pacing."
+    },
+    {
+      "token": "96px vertical rhythm",
+      "category": "layout_spacing",
+      "maps_to": "layout.spacing",
+      "definition": "Large section-to-section spacing cadence to increase hierarchy clarity."
+    },
+    {
+      "token": "8pt spacing scale",
+      "category": "layout_spacing",
+      "maps_to": "layout.spacing",
+      "definition": "Spacing increments quantized to 8px multiples for consistency."
+    },
+    {
+      "token": "density zoning",
+      "category": "layout_spacing",
+      "maps_to": "layout.density",
+      "definition": "Intentional alternation between dense and airy zones across sections."
+    },
+    {
+      "token": "negative space framing",
+      "category": "layout_spacing",
+      "maps_to": "layout.structure",
+      "definition": "Surrounding priority content with empty space to increase salience."
+    },
+    {
+      "token": "edge-to-edge breakout",
+      "category": "layout_spacing",
+      "maps_to": "layout.narrative_flow",
+      "definition": "Periodic full-bleed sections used to reset visual momentum."
+    },
+    {
+      "token": "hero-dominant above fold",
+      "category": "layout_structure",
+      "maps_to": "layout.structure",
+      "definition": "The first viewport is controlled by one large headline or message block."
+    },
+    {
+      "token": "proof-first sequence",
+      "category": "layout_structure",
+      "maps_to": "layout.narrative_flow",
+      "definition": "Early placement of evidence elements before detailed feature content."
+    },
+    {
+      "token": "problem-to-solution arc",
+      "category": "layout_structure",
+      "maps_to": "layout.narrative_flow",
+      "definition": "Narrative progression from pain point framing to product resolution."
+    },
+    {
+      "token": "alternating panel cadence",
+      "category": "layout_structure",
+      "maps_to": "layout.rhythm",
+      "definition": "Alternating section treatments to sustain scanning and reduce monotony."
+    },
+    {
+      "token": "anchored conversion rail",
+      "category": "layout_structure",
+      "maps_to": "layout.structure",
+      "definition": "Persistent conversion zone that remains visible through key scroll ranges."
+    },
+    {
+      "token": "oversized neo-grotesk hero",
+      "category": "typography_display",
+      "maps_to": "typography.hero",
+      "definition": "Large geometric sans headline optimized for impact and modern tone."
+    },
+    {
+      "token": "tight display tracking",
+      "category": "typography_display",
+      "maps_to": "typography.tracking_strategy",
+      "definition": "Reduced letter spacing on headlines to increase visual density."
+    },
+    {
+      "token": "high x-height body face",
+      "category": "typography_display",
+      "maps_to": "typography.body",
+      "definition": "Body type with tall lowercase forms for improved screen legibility."
+    },
+    {
+      "token": "optical size contrast",
+      "category": "typography_display",
+      "maps_to": "typography.scale",
+      "definition": "Intentional size jump between display and support copy for hierarchy."
+    },
+    {
+      "token": "editorial pull-quote headline",
+      "category": "typography_display",
+      "maps_to": "typography.hero",
+      "definition": "Headline style mimicking editorial quote emphasis rather than slogan tone."
+    },
+    {
+      "token": "two-family stack",
+      "category": "typography_system",
+      "maps_to": "typography.families",
+      "definition": "Primary display family paired with a distinct supporting body family."
+    },
+    {
+      "token": "weight-contrast ladder",
+      "category": "typography_system",
+      "maps_to": "typography.weight_strategy",
+      "definition": "Defined progression of font weights across headline, subhead, and body."
+    },
+    {
+      "token": "line-height breathing room",
+      "category": "typography_system",
+      "maps_to": "typography.body",
+      "definition": "Generous leading to support readability in text-heavy sections."
+    },
+    {
+      "token": "caps micro-labels",
+      "category": "typography_system",
+      "maps_to": "typography.scale",
+      "definition": "Small uppercase labels used for metadata or section framing."
+    },
+    {
+      "token": "numeric tabular alignment",
+      "category": "typography_system",
+      "maps_to": "typography.body",
+      "definition": "Tabular numeral usage to align metrics and comparison data."
+    },
+    {
+      "token": "charcoal base layer",
+      "category": "surface_base",
+      "maps_to": "surface.base",
+      "definition": "Near-black foundation used for high contrast and visual restraint."
+    },
+    {
+      "token": "warm off-white canvas",
+      "category": "surface_base",
+      "maps_to": "surface.base",
+      "definition": "Low-glare light background with slight warmth for editorial tone."
+    },
+    {
+      "token": "dual-tone section grounding",
+      "category": "surface_base",
+      "maps_to": "surface.base",
+      "definition": "Alternating foundational tones to segment narrative chapters."
+    },
+    {
+      "token": "muted neutral substrate",
+      "category": "surface_base",
+      "maps_to": "surface.base",
+      "definition": "Low-saturation base colors that foreground content over decoration."
+    },
+    {
+      "token": "contrast reserve strategy",
+      "category": "surface_base",
+      "maps_to": "surface.accent",
+      "definition": "Preserving strong contrast moments only for priority interactions."
+    },
+    {
+      "token": "electric accent glow",
+      "category": "surface_accent",
+      "maps_to": "surface.accent",
+      "definition": "Bright synthetic accent used sparingly for focal emphasis."
+    },
+    {
+      "token": "restrained gradient diffusion",
+      "category": "surface_accent",
+      "maps_to": "surface.textures",
+      "definition": "Soft gradient spread with low saturation and limited footprint."
+    },
+    {
+      "token": "frosted glass panel",
+      "category": "surface_accent",
+      "maps_to": "surface.panels",
+      "definition": "Semi-transparent panel with blur and subtle edge highlight."
+    },
+    {
+      "token": "ambient shadow cloud",
+      "category": "surface_accent",
+      "maps_to": "surface.shadows",
+      "definition": "Soft, broad shadowing that suggests elevation without harsh edges."
+    },
+    {
+      "token": "hairline border contrast",
+      "category": "surface_accent",
+      "maps_to": "surface.panels",
+      "definition": "Thin border treatment to define surfaces in low-contrast palettes."
+    },
+    {
+      "token": "flat",
+      "category": "surface_depth",
+      "maps_to": "surface.depth_model",
+      "definition": "Minimal elevation cues with emphasis on color and spacing separation."
+    },
+    {
+      "token": "layered",
+      "category": "surface_depth",
+      "maps_to": "surface.depth_model",
+      "definition": "Clear z-axis hierarchy through cards, overlaps, and shadow gradation."
+    },
+    {
+      "token": "glass",
+      "category": "surface_depth",
+      "maps_to": "surface.depth_model",
+      "definition": "Depth defined primarily by translucent surfaces and blur effects."
+    },
+    {
+      "token": "hybrid",
+      "category": "surface_depth",
+      "maps_to": "surface.depth_model",
+      "definition": "Combination of flat and elevated components by interaction priority."
+    },
+    {
+      "token": "textured haze overlay",
+      "category": "surface_depth",
+      "maps_to": "surface.textures",
+      "definition": "Low-opacity atmospheric texture that adds depth without distraction."
+    },
+    {
+      "token": "fade-up staggered reveal",
+      "category": "motion_scroll",
+      "maps_to": "motion.scroll",
+      "definition": "Elements appear with upward translation and delayed sequencing on scroll."
+    },
+    {
+      "token": "scroll chapter transitions",
+      "category": "motion_scroll",
+      "maps_to": "motion.scroll",
+      "definition": "Section boundary transitions that signal narrative progression."
+    },
+    {
+      "token": "parallax depth drift",
+      "category": "motion_scroll",
+      "maps_to": "motion.scroll",
+      "definition": "Background and foreground layers move at different scroll rates."
+    },
+    {
+      "token": "sticky stepper narrative",
+      "category": "motion_scroll",
+      "maps_to": "motion.scroll",
+      "definition": "Pinned content region synchronized with stepwise scroll states."
+    },
+    {
+      "token": "opacity-only fallback",
+      "category": "motion_scroll",
+      "maps_to": "motion.reduced_motion_strategy",
+      "definition": "Reduced-motion mode that removes transforms but preserves sequencing cues."
+    },
+    {
+      "token": "200ms ease-out hover scale",
+      "category": "motion_interaction",
+      "maps_to": "motion.hover",
+      "definition": "Short hover animation increasing size slightly with eased deceleration."
+    },
+    {
+      "token": "magnetic CTA pull",
+      "category": "motion_interaction",
+      "maps_to": "motion.interaction_signatures",
+      "definition": "Cursor-proximate motion attracting call-to-action elements."
+    },
+    {
+      "token": "card lift hover",
+      "category": "motion_interaction",
+      "maps_to": "motion.interaction_signatures",
+      "definition": "Subtle elevation and shadow increase on pointer hover."
+    },
+    {
+      "token": "border-brighten feedback",
+      "category": "motion_interaction",
+      "maps_to": "motion.hover",
+      "definition": "Interactive border luminance increase to confirm affordance."
+    },
+    {
+      "token": "snappy timing profile",
+      "category": "motion_interaction",
+      "maps_to": "motion.timing_profile",
+      "definition": "Fast interactions with minimal dwell and quick settle timing."
+    },
+    {
+      "token": "Swiss grid discipline",
+      "category": "influence",
+      "maps_to": "influence.primary",
+      "definition": "Order-focused layout tradition emphasizing alignment and hierarchy."
+    },
+    {
+      "token": "editorial minimalism",
+      "category": "influence",
+      "maps_to": "influence.primary",
+      "definition": "Content-led aesthetic with restrained visual ornament and strong type."
+    },
+    {
+      "token": "SaaS futurism",
+      "category": "influence",
+      "maps_to": "influence.secondary",
+      "definition": "Contemporary product aesthetic using synthetic accents and controlled glow."
+    },
+    {
+      "token": "brutalist digital edge",
+      "category": "influence",
+      "maps_to": "influence.secondary",
+      "definition": "Deliberate rawness through stark contrast, rigid shapes, and minimal polish."
+    },
+    {
+      "token": "tech minimalism cluster",
+      "category": "influence",
+      "maps_to": "influence.style_cluster",
+      "definition": "Style grouping centered on clean structure with focused technical cues."
+    },
+    {
+      "token": "avoid ornamental motion",
+      "category": "anti_pattern",
+      "maps_to": "influence.anti_patterns",
+      "definition": "Reject animations that do not communicate state or improve usability."
+    },
+    {
+      "token": "avoid gradient oversaturation",
+      "category": "anti_pattern",
+      "maps_to": "influence.anti_patterns",
+      "definition": "Reject high-intensity gradients that reduce text legibility."
+    },
+    {
+      "token": "avoid style drift across sections",
+      "category": "anti_pattern",
+      "maps_to": "influence.anti_patterns",
+      "definition": "Reject inconsistent visual language shifts without narrative rationale."
+    },
+    {
+      "token": "avoid hierarchy flattening",
+      "category": "anti_pattern",
+      "maps_to": "typography.scale",
+      "definition": "Reject size systems where priority content and support copy converge."
+    },
+    {
+      "token": "avoid contrast debt",
+      "category": "anti_pattern",
+      "maps_to": "surface.base",
+      "definition": "Reject palette choices that erode text or interaction readability."
+    }
+  ]
+}
