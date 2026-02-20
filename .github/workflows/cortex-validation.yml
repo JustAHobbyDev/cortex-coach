@@ -1,0 +1,30 @@
+name: Cortex Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    name: Quality Gate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run CI quality gate
+        run: |
+          chmod +x scripts/ci_validate_docs_and_json_v0.sh
+          chmod +x scripts/quality_gate_v0.sh
+          chmod +x scripts/quality_gate_ci_v0.sh
+          ./scripts/quality_gate_ci_v0.sh
