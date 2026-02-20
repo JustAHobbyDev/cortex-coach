@@ -12,6 +12,7 @@ This documentation is for users running `cortex-coach` in their own projects.
 6. [Quality Gate](quality-gate.md)
 7. [FAQ](faq.md)
 8. [Troubleshooting](troubleshooting.md)
+9. [Known Issue: decision-gap recursion](known_issue_decision_gap_recursive_v0.md)
 
 ## What Cortex Coach Does
 
