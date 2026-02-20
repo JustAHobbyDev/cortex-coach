@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify-version-tag:
+    runs-on: ubuntu-latest
+    name: Verify Version Tag
+    outputs:
+      release_tag: ${{ steps.tag.outputs.release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          echo "release_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate tag matches pyproject version
+        run: |
+          python - << 'PY'
+          import pathlib, tomllib
+          tag = "${{ steps.tag.outputs.release_tag }}"
+          py = pathlib.Path("pyproject.toml")
+          obj = tomllib.loads(py.read_text(encoding="utf-8"))
+          version = obj["project"]["version"]
+          expected = f"v{version}"
+          if tag != expected:
+              raise SystemExit(f"tag/version mismatch: tag={tag!r} expected={expected!r}")
+          print(f"ok: tag matches version ({tag})")
+          PY
+
+  quality-gate:
+    runs-on: ubuntu-latest
+    name: Quality Gate
+    needs: verify-version-tag
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run CI quality gate
+        run: |
+          chmod +x scripts/ci_validate_docs_and_json_v0.sh
+          chmod +x scripts/quality_gate_v0.sh
+          chmod +x scripts/quality_gate_ci_v0.sh
+          ./scripts/quality_gate_ci_v0.sh
+
+  publish-release:
+    runs-on: ubuntu-latest
+    name: Publish GitHub Release
+    needs: [verify-version-tag, quality-gate]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build
+          python -m build
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify-version-tag.outputs.release_tag }}
+          generate_release_notes: true
+          files: |
+            dist/*
