@@ -13,6 +13,7 @@ This documentation is for users running `cortex-coach` in their own projects.
 7. [FAQ](faq.md)
 8. [Troubleshooting](troubleshooting.md)
 9. [Known Issue: decision-gap recursion](known_issue_decision_gap_recursive_v0.md)
+10. [Bugfix Plan: decision-gap vs audit artifacts](bugfix_plan_decision_gap_audit_artifacts_v0.md)
 
 ## What Cortex Coach Does
 
