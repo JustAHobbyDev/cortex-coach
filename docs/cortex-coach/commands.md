@@ -245,6 +245,8 @@ cortex-coach decision-capture \
   --decision "Use strict local gate and CI correctness gate." \
   --rationale "Avoid dirty-tree false negatives in CI." \
   --impact-scope governance,ci,docs \
+  --reflection-id ref_20260220T000000Z_split_local_ci_quality \
+  --reflection-report .cortex/reports/reflection_scaffold_20260220T000000Z_split_local_ci_quality_v0.json \
   --linked-artifacts .github/workflows/cortex-validation.yml,docs/cortex-coach/quality-gate.md
 ```
 
@@ -269,9 +271,11 @@ Useful options:
 - `--linked-artifacts a,b,c`: explicitly include artifact paths
 - `--no-auto-link-governance-dirty`: disable automatic inclusion of governance-impacting dirty files
 - `--strict-generated`: include generated audit deltas when auto-linking dirty files
-- `--out-file <path>`: persist scaffold report
+- `--out-file <path>`: override scaffold report location
 
 Outputs include:
+- reflection report persisted by default to `.cortex/reports/reflection_scaffold_<timestamp>_<slug>_v0.json`
+- `reflection_id` and `report_file` for linking into `decision-capture`
 - suggested decision statement/rationale
 - suggested decision artifact path
 - suggested linked artifacts (explicit + auto-linked governance dirty files)
@@ -330,6 +334,26 @@ cortex-coach decision-gap-check \
 
 Default behavior ignores audit-managed generated deltas (for example lifecycle-audit updates to
 `updated_at` / `phases.lifecycle_audited` in manifest). Use `--strict-generated` to enforce on those.
+
+## `reflection-completeness-check`
+
+Fail when persisted reflection scaffold reports are not mapped to decision entries with linked artifacts.
+
+```bash
+cortex-coach reflection-completeness-check \
+  --project-dir /path/to/project \
+  --required-decision-status candidate \
+  --format json
+```
+
+`--required-decision-status` options:
+- `candidate` (default): reflection must map to candidate/promoted decision
+- `promoted`: reflection must map to promoted decision
+
+Checks enforced per scaffold report:
+- at least one mapped decision entry
+- mapped decision includes non-empty `linked_artifacts`
+- mapped decision covers scaffold `suggested_linked_artifacts`
 
 Audit behavior:
 - `audit` fails `unsynced_decisions` when promoted decisions have `impact_scope` but no `linked_artifacts`.

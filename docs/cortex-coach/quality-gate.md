@@ -39,14 +39,16 @@ Fallback:
 
 1. `audit-needed` with fail-on-required behavior
 2. `cortex-coach` smoke commands
-3. docs local-link + JSON integrity
-4. focused `cortex-coach` pytest suite
+3. `reflection-completeness-check`
+4. docs local-link + JSON integrity
+5. focused `cortex-coach` pytest suite
 
 `quality-gate-ci`:
 
 1. `cortex-coach` smoke commands
-2. docs local-link + JSON integrity
-3. focused `cortex-coach` pytest suite
+2. `reflection-completeness-check`
+3. docs local-link + JSON integrity
+4. focused `cortex-coach` pytest suite
 
 ## When to Run
 

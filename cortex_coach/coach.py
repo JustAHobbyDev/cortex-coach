@@ -1899,6 +1899,8 @@ def decision_capture_project(args: argparse.Namespace) -> int:
         "rationale": args.rationale.strip(),
         "impact_scope": parse_csv_list(args.impact_scope),
         "linked_artifacts": parse_csv_list(args.linked_artifacts),
+        "reflection_id": args.reflection_id.strip() if args.reflection_id else None,
+        "reflection_report": normalize_repo_rel_path(args.reflection_report) if args.reflection_report else None,
         "decision_artifact": None,
     }
     entries.append(entry)
@@ -1970,19 +1972,37 @@ def reflection_scaffold_project(args: argparse.Namespace) -> int:
 
     impact_scope_csv = ",".join(impact_scope)
     linked_csv = ",".join(combined_links)
+    reflection_id = f"ref_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{slugify(title)[:24]}"
+
+    if args.out_file:
+        report_out = Path(args.out_file)
+        if not report_out.is_absolute():
+            report_out = project_dir / report_out
+    else:
+        reports_dir = cortex_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        report_out = reports_dir / f"reflection_scaffold_{ts}_{slugify(title)[:24]}_v0.json"
+    try:
+        report_out_rel = normalize_repo_rel_path(str(report_out.relative_to(project_dir)))
+    except ValueError:
+        report_out_rel = str(report_out)
 
     capture_cmd = (
         f'cortex-coach decision-capture --project-dir {project_dir} --title "{title}" '
-        f'--decision "{decision_text}" --rationale "{rationale}" --impact-scope {impact_scope_csv}'
+        f'--decision "{decision_text}" --rationale "{rationale}" --impact-scope {impact_scope_csv} '
+        f'--reflection-id {reflection_id} --reflection-report {report_out_rel}'
     )
     if linked_csv:
         capture_cmd += f" --linked-artifacts {linked_csv}"
 
     report = {
         "version": "v0",
+        "reflection_id": reflection_id,
         "run_at": utc_now(),
         "project_dir": str(project_dir),
         "cortex_root": str(cortex_dir),
+        "report_file": report_out_rel,
         "title": title,
         "mistake": mistake,
         "pattern": pattern,
@@ -2013,8 +2033,10 @@ def reflection_scaffold_project(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(f"title: {report['title']}")
+        print(f"reflection_id: {report['reflection_id']}")
         print(f"impact_scope: {','.join(report['impact_scope'])}")
         print(f"suggested_decision_artifact: {report['suggested_decision_artifact']}")
+        print(f"report_file: {report['report_file']}")
         print(f"suggested_linked_artifacts: {len(report['suggested_linked_artifacts'])}")
         for rel in report["suggested_linked_artifacts"]:
             print(f"- {rel}")
@@ -2022,13 +2044,179 @@ def reflection_scaffold_project(args: argparse.Namespace) -> int:
         for cmd in report["recommended_commands"]:
             print(f"- {cmd}")
 
+    atomic_write_text(report_out, json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+    return 0
+
+
+def compute_reflection_completeness_check(
+    project_dir: Path,
+    cortex_dir: Path,
+    required_decision_status: str = "candidate",
+) -> tuple[str, dict[str, Any]]:
+    reports_dir = cortex_dir / "reports"
+    scaffold_files = sorted(reports_dir.glob("reflection_scaffold_*_v0.json"))
+    registry = load_decision_candidates(project_dir, cortex_dir=cortex_dir)
+    entries = registry.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+
+    required = required_decision_status.strip().lower()
+    allowed_status = {"promoted"} if required == "promoted" else {"candidate", "promoted"}
+
+    findings: list[dict[str, Any]] = []
+    mappings: list[dict[str, Any]] = []
+
+    for path in scaffold_files:
+        rel_path = normalize_repo_rel_path(str(path.relative_to(project_dir)))
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            findings.append(
+                {
+                    "severity": "fail",
+                    "check": "invalid_reflection_report",
+                    "path": rel_path,
+                    "detail": f"failed to parse reflection scaffold report: {exc}",
+                }
+            )
+            continue
+        if not isinstance(obj, dict):
+            findings.append(
+                {
+                    "severity": "fail",
+                    "check": "invalid_reflection_report",
+                    "path": rel_path,
+                    "detail": "reflection scaffold report is not a JSON object",
+                }
+            )
+            continue
+
+        reflection_id = str(obj.get("reflection_id", "")).strip()
+        title = str(obj.get("title", "")).strip()
+        suggested_links_raw = obj.get("suggested_linked_artifacts", [])
+        if not isinstance(suggested_links_raw, list):
+            suggested_links_raw = []
+        suggested_links = sorted({normalize_repo_rel_path(str(x)) for x in suggested_links_raw if str(x).strip()})
+
+        candidates: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            status = str(entry.get("status", "")).strip().lower()
+            if status not in allowed_status:
+                continue
+            entry_reflection_id = str(entry.get("reflection_id", "")).strip()
+            entry_reflection_report = normalize_repo_rel_path(str(entry.get("reflection_report", "")).strip())
+            entry_title = str(entry.get("title", "")).strip()
+            if reflection_id and entry_reflection_id and reflection_id == entry_reflection_id:
+                candidates.append(entry)
+                continue
+            if entry_reflection_report and entry_reflection_report == rel_path:
+                candidates.append(entry)
+                continue
+            if title and entry_title == title:
+                candidates.append(entry)
+
+        if not candidates:
+            findings.append(
+                {
+                    "severity": "fail",
+                    "check": "reflection_without_decision",
+                    "path": rel_path,
+                    "detail": (
+                        "reflection scaffold has no mapped decision entry "
+                        f"(required_status={required}; title={title or '(none)'})"
+                    ),
+                }
+            )
+            continue
+
+        candidates.sort(key=lambda e: 0 if str(e.get("status", "")).lower() == "promoted" else 1)
+        selected = candidates[0]
+        linked_raw = selected.get("linked_artifacts", [])
+        if not isinstance(linked_raw, list):
+            linked_raw = []
+        linked = sorted({normalize_repo_rel_path(str(x)) for x in linked_raw if str(x).strip()})
+        missing = sorted([x for x in suggested_links if x not in set(linked)])
+
+        if not linked:
+            findings.append(
+                {
+                    "severity": "fail",
+                    "check": "reflection_decision_without_links",
+                    "path": rel_path,
+                    "decision_id": selected.get("decision_id"),
+                    "detail": "mapped decision is missing linked_artifacts",
+                }
+            )
+            continue
+        if missing:
+            findings.append(
+                {
+                    "severity": "fail",
+                    "check": "reflection_missing_linked_artifacts",
+                    "path": rel_path,
+                    "decision_id": selected.get("decision_id"),
+                    "missing_links": missing,
+                    "detail": f"mapped decision is missing {len(missing)} scaffold-linked artifact(s)",
+                }
+            )
+            continue
+
+        mappings.append(
+            {
+                "path": rel_path,
+                "reflection_id": reflection_id,
+                "decision_id": selected.get("decision_id"),
+                "decision_status": selected.get("status"),
+            }
+        )
+
+    status = "pass" if not findings else "fail"
+    report = {
+        "version": "v0",
+        "run_at": utc_now(),
+        "project_dir": str(project_dir),
+        "cortex_root": str(cortex_dir),
+        "status": status,
+        "required_decision_status": required,
+        "scaffold_reports_scanned": len(scaffold_files),
+        "decision_entries_scanned": len(entries),
+        "mappings": mappings,
+        "findings": findings,
+    }
+    return status, report
+
+
+def reflection_completeness_check_project(args: argparse.Namespace) -> int:
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    status, report = compute_reflection_completeness_check(
+        project_dir=project_dir,
+        cortex_dir=cortex_dir,
+        required_decision_status=args.required_decision_status,
+    )
+
+    if args.format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"status: {report['status']}")
+        print(f"scaffold_reports_scanned: {report['scaffold_reports_scanned']}")
+        print(f"mappings: {len(report.get('mappings', []))}")
+        print(f"findings: {len(report.get('findings', []))}")
+        if report.get("findings"):
+            print("findings_detail:")
+            for finding in report["findings"]:
+                print(f"- {finding.get('check')}: {finding.get('path')}")
+
     if args.out_file:
         out = Path(args.out_file)
         if not out.is_absolute():
             out = project_dir / out
         atomic_write_text(out, json.dumps(report, indent=2, sort_keys=True) + "\n")
 
-    return 0
+    return 0 if status == "pass" else 1
 
 def decision_list_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
@@ -2585,6 +2773,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Comma-separated project-relative artifact paths already updated by this decision.",
     )
+    p_decision_capture.add_argument(
+        "--reflection-id",
+        default="",
+        help="Optional reflection scaffold identifier to link decision back to a reflection event.",
+    )
+    p_decision_capture.add_argument(
+        "--reflection-report",
+        default="",
+        help="Optional reflection scaffold report path to link decision back to a reflection event.",
+    )
     p_decision_capture.add_argument("--format", choices=["text", "json"], default="text")
     add_lock_args(p_decision_capture)
     p_decision_capture.set_defaults(func=decision_capture_project)
@@ -2623,6 +2821,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_reflection_scaffold.add_argument("--format", choices=["text", "json"], default="text")
     p_reflection_scaffold.add_argument("--out-file")
+    add_lock_args(p_reflection_scaffold)
     p_reflection_scaffold.set_defaults(func=reflection_scaffold_project)
 
     p_decision_list = sub.add_parser(
@@ -2648,6 +2847,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_decision_gap.add_argument("--out-file")
     p_decision_gap.set_defaults(func=decision_gap_check_project)
+
+    p_reflection_complete = sub.add_parser(
+        "reflection-completeness-check",
+        help="Fail when persisted reflection scaffolds are not mapped to decision entries with linked artifacts.",
+    )
+    p_reflection_complete.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_reflection_complete)
+    p_reflection_complete.add_argument(
+        "--required-decision-status",
+        choices=["candidate", "promoted"],
+        default="candidate",
+        help="Minimum decision status required for reflection mapping (default: candidate).",
+    )
+    p_reflection_complete.add_argument("--format", choices=["text", "json"], default="text")
+    p_reflection_complete.add_argument("--out-file")
+    p_reflection_complete.set_defaults(func=reflection_completeness_check_project)
 
     p_decision_promote = sub.add_parser(
         "decision-promote",
@@ -2696,7 +2911,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    if args.cmd in {"init", "audit", "coach", "policy-enable", "decision-capture", "decision-promote"}:
+    if args.cmd in {"init", "audit", "coach", "policy-enable", "decision-capture", "decision-promote", "reflection-scaffold"}:
         project_dir = Path(args.project_dir).resolve()
         try:
             with project_lock(
