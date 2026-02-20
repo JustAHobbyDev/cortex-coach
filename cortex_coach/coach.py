@@ -52,7 +52,6 @@ DEFAULT_MEDIUM_RISK_PATTERNS = [
 DEFAULT_DECISION_GAP_PATTERNS = [
     ".cortex/manifest_v0.json",
     ".cortex/policies/**",
-    ".cortex/artifacts/decisions/**",
     "policies/**",
     "playbooks/**",
     "scripts/quality_gate*.sh",
@@ -1326,6 +1325,68 @@ def _matches_any(path: str, patterns: list[str]) -> bool:
     return any(fnmatch(path, pat) for pat in patterns)
 
 
+def _git_head_file_text(project_dir: Path, rel_path: str) -> str | None:
+    proc = subprocess.run(
+        ["git", "-C", str(project_dir), "show", f"HEAD:{rel_path}"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _collect_changed_json_paths(before: Any, after: Any, prefix: str = "") -> list[str]:
+    if type(before) is not type(after):  # noqa: E721
+        return [prefix or "<root>"]
+    if isinstance(before, dict):
+        out: list[str] = []
+        keys = set(before.keys()) | set(after.keys())
+        for k in sorted(keys):
+            next_prefix = f"{prefix}.{k}" if prefix else str(k)
+            if k not in before or k not in after:
+                out.append(next_prefix)
+                continue
+            out.extend(_collect_changed_json_paths(before[k], after[k], next_prefix))
+        return out
+    if isinstance(before, list):
+        if before == after:
+            return []
+        return [prefix or "<root>"]
+    if before != after:
+        return [prefix or "<root>"]
+    return []
+
+
+def _is_audit_managed_manifest_delta(project_dir: Path, rel_path: str) -> bool:
+    head_text = _git_head_file_text(project_dir, rel_path)
+    current_path = project_dir / rel_path
+    if head_text is None or not current_path.exists():
+        return False
+    try:
+        before = json.loads(head_text)
+        after = json.loads(current_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    changed = set(_collect_changed_json_paths(before, after))
+    if not changed:
+        return False
+    allowed = {"updated_at", "phases.lifecycle_audited"}
+    return changed.issubset(allowed)
+
+
+def _is_generated_audit_delta(project_dir: Path, cortex_dir: Path, rel_path: str) -> bool:
+    try:
+        cortex_rel = str(cortex_dir.relative_to(project_dir))
+    except ValueError:
+        return False
+    manifest_rel = normalize_repo_rel_path(f"{cortex_rel}/{MANIFEST_FILE}")
+    if rel_path == manifest_rel and _is_audit_managed_manifest_delta(project_dir, rel_path):
+        return True
+    return False
+
+
 def classify_dirty_files(files: list[str]) -> dict[str, list[str]]:
     out = {"high": [], "medium": [], "low": [], "ignored": []}
     for path in files:
@@ -1340,7 +1401,11 @@ def classify_dirty_files(files: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def compute_decision_gap_check(project_dir: Path, cortex_dir: Path) -> tuple[str, dict[str, Any]]:
+def compute_decision_gap_check(
+    project_dir: Path,
+    cortex_dir: Path,
+    strict_generated: bool = False,
+) -> tuple[str, dict[str, Any]]:
     files, err = git_dirty_files(project_dir)
     if err is not None:
         report = {
@@ -1359,9 +1424,16 @@ def compute_decision_gap_check(project_dir: Path, cortex_dir: Path) -> tuple[str
         return "unknown", report
 
     normalized_files = sorted({normalize_repo_rel_path(f) for f in files if f.strip()})
-    impact_files = [
+    impact_files_raw = [
         path for path in normalized_files if any(fnmatch(path, pat) for pat in DEFAULT_DECISION_GAP_PATTERNS)
     ]
+    generated_ignored_files: list[str] = []
+    impact_files = list(impact_files_raw)
+    if not strict_generated:
+        generated_ignored_files = [
+            p for p in impact_files if _is_generated_audit_delta(project_dir, cortex_dir, p)
+        ]
+        impact_files = [p for p in impact_files if p not in generated_ignored_files]
 
     registry = load_decision_candidates(project_dir, cortex_dir=cortex_dir)
     entries = registry.get("entries", [])
@@ -1394,6 +1466,8 @@ def compute_decision_gap_check(project_dir: Path, cortex_dir: Path) -> tuple[str
         "cortex_root": str(cortex_dir),
         "status": status,
         "dirty_files": normalized_files,
+        "strict_generated": strict_generated,
+        "generated_ignored_files": generated_ignored_files,
         "governance_impact_files": impact_files,
         "covered_files": covered,
         "uncovered_files": uncovered,
@@ -1859,7 +1933,11 @@ def decision_list_project(args: argparse.Namespace) -> int:
 def decision_gap_check_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
-    status, report = compute_decision_gap_check(project_dir, cortex_dir)
+    status, report = compute_decision_gap_check(
+        project_dir,
+        cortex_dir,
+        strict_generated=bool(args.strict_generated),
+    )
 
     if args.format == "json":
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -2409,6 +2487,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_decision_gap.add_argument("--project-dir", required=True)
     add_cortex_root_arg(p_decision_gap)
     p_decision_gap.add_argument("--format", choices=["text", "json"], default="text")
+    p_decision_gap.add_argument(
+        "--strict-generated",
+        action="store_true",
+        help="Include generated audit bookkeeping deltas in governance-impact matching.",
+    )
     p_decision_gap.add_argument("--out-file")
     p_decision_gap.set_defaults(func=decision_gap_check_project)
 

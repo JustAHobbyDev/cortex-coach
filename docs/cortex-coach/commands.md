@@ -283,6 +283,28 @@ Writes:
 - `.cortex/artifacts/decisions/decision_<slug>_vN.md`
 - updates `.cortex/reports/decision_candidates_v0.json`
 
+## `decision-gap-check`
+
+Detect governance-impacting dirty files that are not linked to decision entries.
+
+```bash
+cortex-coach decision-gap-check \
+  --project-dir /path/to/project \
+  --format json
+```
+
+Strict generated mode:
+
+```bash
+cortex-coach decision-gap-check \
+  --project-dir /path/to/project \
+  --strict-generated \
+  --format json
+```
+
+Default behavior ignores audit-managed generated deltas (for example lifecycle-audit updates to
+`updated_at` / `phases.lifecycle_audited` in manifest). Use `--strict-generated` to enforce on those.
+
 Audit behavior:
 - `audit` fails `unsynced_decisions` when promoted decisions have `impact_scope` but no `linked_artifacts`.
 
