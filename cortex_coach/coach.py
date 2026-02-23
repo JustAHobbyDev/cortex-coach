@@ -86,6 +86,7 @@ DEFAULT_CONTRACT_FILE = "contracts/coach_asset_contract_v0.json"
 MEMORY_COMMAND_VERSION = "v0"
 MEMORY_RECORD_SCHEMA_REL_PATH = "contracts/tactical_memory_record_schema_v0.json"
 MEMORY_SEARCH_SCHEMA_REL_PATH = "contracts/tactical_memory_search_result_schema_v0.json"
+MEMORY_PRIME_SCHEMA_REL_PATH = "contracts/tactical_memory_prime_bundle_schema_v0.json"
 TACTICAL_MEMORY_RECORDS_REL_PATH = "state/tactical_memory/records_v0.jsonl"
 TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH = "state/tactical_memory/sanitization_incidents_v0.jsonl"
 MEMORY_EXIT_SUCCESS = 0
@@ -119,6 +120,7 @@ MEMORY_SEARCH_TIE_BREAK_ORDER = [
     "captured_at_desc",
     "record_id_asc",
 ]
+MEMORY_PRIME_ORDERING_POLICY = "relevance_desc_then_recency_desc_then_record_id_asc"
 MEMORY_POLICY_BLOCK_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     (
         "private_key_material",
@@ -470,6 +472,33 @@ def compute_rule_based_score(record: dict[str, Any], tokens: list[str], normaliz
     if normalized_query and normalized_query in text:
         score += 1.0
     return score
+
+
+def rank_query_matches(
+    records: list[dict[str, Any]],
+    normalized_query: str,
+    tokens: list[str],
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for record in records:
+        score = compute_rule_based_score(record, tokens, normalized_query)
+        if score <= 0:
+            continue
+        matches.append(
+            {
+                "record": record,
+                "score": float(round(score, 6)),
+                "captured_epoch": parse_record_captured_at_epoch(record),
+            }
+        )
+    matches.sort(
+        key=lambda item: (
+            -float(item["score"]),
+            -float(item["captured_epoch"]),
+            str(item["record"].get("record_id", "")),
+        )
+    )
+    return matches
 
 
 def record_matches_search_filters(
@@ -2503,18 +2532,11 @@ def memory_search_project(args: argparse.Namespace) -> int:
 
         records = load_tactical_records(records_path)
 
-        query_matches: list[dict[str, Any]] = []
-        for record in records:
-            score = compute_rule_based_score(record, tokens, normalized_query)
-            if score <= 0:
-                continue
-            query_matches.append(
-                {
-                    "record": record,
-                    "score": float(round(score, 6)),
-                    "captured_epoch": parse_record_captured_at_epoch(record),
-                }
-            )
+        query_matches = rank_query_matches(
+            records=records,
+            normalized_query=normalized_query,
+            tokens=tokens,
+        )
 
         filtered_matches: list[dict[str, Any]] = []
         for entry in query_matches:
@@ -2528,14 +2550,6 @@ def memory_search_project(args: argparse.Namespace) -> int:
                 captured_at_to=captured_at_to,
             ):
                 filtered_matches.append(entry)
-
-        filtered_matches.sort(
-            key=lambda item: (
-                -float(item["score"]),
-                -float(item["captured_epoch"]),
-                str(item["record"].get("record_id", "")),
-            )
-        )
 
         limited = filtered_matches[: int(args.limit)]
         results: list[dict[str, Any]] = []
@@ -2649,6 +2663,207 @@ def memory_search_project(args: argparse.Namespace) -> int:
             error={
                 "code": "internal_error",
                 "message": "unexpected runtime failure during memory-search",
+                "details": {"exception": str(exc)},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INTERNAL
+
+
+def memory_prime_project(args: argparse.Namespace) -> int:
+    command = "memory-prime"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    assets_dir = resolve_assets_dir(getattr(args, "assets_dir", None))
+    records_path, _ = tactical_memory_paths(cortex_dir)
+
+    task = args.task.strip()
+    query_ref = args.query_ref.strip()
+    normalized_query = normalize_query_text(query_ref)
+    tokens = query_tokens(normalized_query)
+
+    result_template: dict[str, Any] = {
+        "input": {
+            "task": task if task else "(empty)",
+            "query_ref": query_ref if query_ref else "(empty)",
+            "requested_limit": int(args.requested_limit),
+        },
+        "budget": {
+            "max_records": int(args.max_records),
+            "max_chars": int(args.max_chars),
+            "per_record_max_chars": int(args.per_record_max_chars),
+        },
+        "ordering_policy": MEMORY_PRIME_ORDERING_POLICY,
+        "selected_count": 0,
+        "selected_char_count": 0,
+        "bundle": [],
+        "truncation": {
+            "applied": False,
+            "reason": "none",
+            "dropped_record_ids": [],
+            "truncated_record_count": 0,
+            "truncated_char_count": 0,
+        },
+    }
+
+    try:
+        if not task:
+            raise ValueError("--task must be non-empty")
+        if not query_ref:
+            raise ValueError("--query-ref must be non-empty")
+        if not tokens:
+            raise ValueError("--query-ref must contain at least one searchable token")
+        if args.requested_limit < 1:
+            raise ValueError("--requested-limit must be >= 1")
+        if args.max_records < 1:
+            raise ValueError("--max-records must be >= 1")
+        if args.max_chars < 1:
+            raise ValueError("--max-chars must be >= 1")
+        if args.per_record_max_chars < 1:
+            raise ValueError("--per-record-max-chars must be >= 1")
+
+        records = load_tactical_records(records_path)
+        ranked = rank_query_matches(
+            records=records,
+            normalized_query=normalized_query,
+            tokens=tokens,
+        )
+        candidates = ranked[: int(args.requested_limit)]
+
+        bundle: list[dict[str, Any]] = []
+        selected_char_count = 0
+        dropped_record_ids: list[str] = []
+        truncated_record_ids: set[str] = set()
+        truncated_char_count = 0
+        hit_record_limit = False
+        hit_char_budget = False
+        hit_per_record_limit = False
+
+        for item in candidates:
+            record = item["record"]
+            record_id = str(record.get("record_id", ""))
+            if len(bundle) >= args.max_records:
+                dropped_record_ids.append(record_id)
+                hit_record_limit = True
+                continue
+
+            content_obj = record.get("content", {})
+            full_text = str(content_obj.get("text", ""))
+            summary = " ".join(full_text.strip().split())
+            if not summary:
+                summary = "(empty)"
+            original_len = len(summary)
+            if len(summary) > args.per_record_max_chars:
+                summary = summary[: args.per_record_max_chars]
+                truncated_record_ids.add(record_id)
+                truncated_char_count += original_len - len(summary)
+                hit_per_record_limit = True
+
+            char_count = len(summary)
+            if (selected_char_count + char_count) > args.max_chars:
+                dropped_record_ids.append(record_id)
+                hit_char_budget = True
+                truncated_record_ids.add(record_id)
+                truncated_char_count += char_count
+                continue
+
+            source_obj = record.get("source", {})
+            provenance_obj = record.get("provenance", {})
+            source_refs_raw = provenance_obj.get("source_refs", [])
+            source_refs = [str(x) for x in source_refs_raw] if isinstance(source_refs_raw, list) else []
+            source_ref = str(source_obj.get("source_ref", ""))
+            if not source_refs and source_ref:
+                source_refs = [source_ref]
+
+            bundle.append(
+                {
+                    "position": len(bundle) + 1,
+                    "record_id": record_id,
+                    "summary": summary,
+                    "char_count": char_count,
+                    "content_class": str(content_obj.get("content_class", "")),
+                    "source_provenance": {
+                        "source_kind": str(source_obj.get("source_kind", "")),
+                        "source_ref": source_ref,
+                        "source_refs": source_refs,
+                    },
+                }
+            )
+            selected_char_count += char_count
+
+        if hit_char_budget:
+            trunc_reason = "char_budget"
+        elif hit_record_limit:
+            trunc_reason = "record_limit"
+        elif hit_per_record_limit:
+            trunc_reason = "per_record_char_limit"
+        else:
+            trunc_reason = "none"
+
+        truncation = {
+            "applied": bool(dropped_record_ids or truncated_record_ids),
+            "reason": trunc_reason,
+            "dropped_record_ids": dropped_record_ids,
+            "truncated_record_count": len(truncated_record_ids),
+            "truncated_char_count": truncated_char_count,
+        }
+
+        result_template["selected_count"] = len(bundle)
+        result_template["selected_char_count"] = selected_char_count
+        result_template["bundle"] = bundle
+        result_template["truncation"] = truncation
+
+        payload = build_command_response(
+            command=command,
+            status="pass",
+            project_dir=project_dir,
+            result=result_template,
+        )
+
+        schema_path = resolve_asset_path(assets_dir, MEMORY_PRIME_SCHEMA_REL_PATH)
+        if not schema_path.exists():
+            raise FileNotFoundError(f"missing schema asset: {schema_path}")
+        schema_obj = json.loads(schema_path.read_text(encoding="utf-8"))
+        jsonschema.validate(instance=payload, schema=schema_obj)
+
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_SUCCESS
+    except ValueError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "invalid_arguments",
+                "message": str(exc),
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except jsonschema.ValidationError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "invalid_payload",
+                "message": "prime payload failed schema validation",
+                "details": {"validation_error": exc.message},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except Exception as exc:  # noqa: BLE001
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "internal_error",
+                "message": "unexpected runtime failure during memory-prime",
                 "details": {"exception": str(exc)},
             },
         )
@@ -3769,6 +3984,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_memory_search.add_argument("--captured-at-from", default="", help="Optional RFC3339 lower bound.")
     p_memory_search.add_argument("--captured-at-to", default="", help="Optional RFC3339 upper bound.")
     p_memory_search.set_defaults(func=memory_search_project)
+
+    p_memory_prime = sub.add_parser(
+        "memory-prime",
+        help="Build a bounded tactical memory priming bundle.",
+    )
+    p_memory_prime.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_memory_prime)
+    add_assets_arg(p_memory_prime)
+    p_memory_prime.add_argument("--format", choices=["text", "json"], default="text")
+    p_memory_prime.add_argument("--task", required=True, help="Task context identifier for priming.")
+    p_memory_prime.add_argument("--query-ref", required=True, help="Search reference/query for bundle selection.")
+    p_memory_prime.add_argument(
+        "--requested-limit",
+        type=int,
+        default=10,
+        help="Maximum ranked records to consider before budgeting (default: 10).",
+    )
+    p_memory_prime.add_argument("--max-records", type=int, default=5, help="Bundle record count budget (default: 5).")
+    p_memory_prime.add_argument("--max-chars", type=int, default=4000, help="Bundle char budget (default: 4000).")
+    p_memory_prime.add_argument(
+        "--per-record-max-chars",
+        type=int,
+        default=500,
+        help="Per-record summary char budget (default: 500).",
+    )
+    p_memory_prime.set_defaults(func=memory_prime_project)
 
     p_coach = sub.add_parser("coach", help="Run one AI-guided lifecycle coaching cycle.")
     p_coach.add_argument("--project-dir", required=True)

@@ -8,7 +8,7 @@ Common option:
 
 ## Tactical Memory Commands (Phase 1)
 
-`memory-record` and `memory-search` are implemented. The remaining tactical memory
+`memory-record`, `memory-search`, and `memory-prime` are implemented. The remaining tactical memory
 commands are still pending.
 
 ### `memory-record`
@@ -73,6 +73,32 @@ Key options:
 No-match semantics:
 - query misses all records: `no_match.reason=no_match`
 - query matches but filters remove all: `no_match.reason=filtered_out`
+
+### `memory-prime`
+
+Build a bounded priming bundle from tactical records with explicit budgets:
+- `--max-records`
+- `--max-chars`
+- `--per-record-max-chars`
+
+```bash
+cortex-coach memory-prime \
+  --project-dir /path/to/project \
+  --task "phase1-handoff" \
+  --query-ref "lock timeout" \
+  --requested-limit 12 \
+  --max-records 6 \
+  --max-chars 3000 \
+  --per-record-max-chars 400 \
+  --format json
+```
+
+Output includes deterministic truncation metadata:
+- `truncation.applied`
+- `truncation.reason` (`none|record_limit|char_budget|per_record_char_limit`)
+- `truncation.dropped_record_ids`
+- `truncation.truncated_record_count`
+- `truncation.truncated_char_count`
 
 ## `init`
 
