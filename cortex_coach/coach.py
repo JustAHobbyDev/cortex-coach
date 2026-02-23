@@ -87,6 +87,7 @@ MEMORY_COMMAND_VERSION = "v0"
 MEMORY_RECORD_SCHEMA_REL_PATH = "contracts/tactical_memory_record_schema_v0.json"
 MEMORY_SEARCH_SCHEMA_REL_PATH = "contracts/tactical_memory_search_result_schema_v0.json"
 MEMORY_PRIME_SCHEMA_REL_PATH = "contracts/tactical_memory_prime_bundle_schema_v0.json"
+MEMORY_DIFF_SCHEMA_REL_PATH = "contracts/tactical_memory_diff_schema_v0.json"
 TACTICAL_MEMORY_RECORDS_REL_PATH = "state/tactical_memory/records_v0.jsonl"
 TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH = "state/tactical_memory/sanitization_incidents_v0.jsonl"
 MEMORY_EXIT_SUCCESS = 0
@@ -121,6 +122,8 @@ MEMORY_SEARCH_TIE_BREAK_ORDER = [
     "record_id_asc",
 ]
 MEMORY_PRIME_ORDERING_POLICY = "relevance_desc_then_recency_desc_then_record_id_asc"
+MEMORY_DIFF_ORDERING_POLICY = "change_type_then_record_id_asc"
+MEMORY_DIFF_COMPARISON_KEYS = ["record_id"]
 MEMORY_POLICY_BLOCK_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     (
         "private_key_material",
@@ -430,6 +433,45 @@ def load_tactical_records(records_path: Path) -> list[dict[str, Any]]:
         if not isinstance(obj, dict):
             raise ValueError(f"invalid tactical record object on line {idx}: expected JSON object")
         out.append(obj)
+    return out
+
+
+def load_tactical_record_map(records_path: Path) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for obj in load_tactical_records(records_path):
+        record_id = str(obj.get("record_id", "")).strip()
+        if not record_id:
+            continue
+        out[record_id] = obj
+    return out
+
+
+def record_lineage(record: dict[str, Any]) -> dict[str, Any]:
+    provenance_obj = record.get("provenance", {})
+    source_refs_raw = provenance_obj.get("source_refs", [])
+    source_refs = [str(x) for x in source_refs_raw] if isinstance(source_refs_raw, list) else []
+    source_refs = [x for x in source_refs if x.strip()]
+    if not source_refs:
+        source_obj = record.get("source", {})
+        source_ref = str(source_obj.get("source_ref", "")).strip()
+        if source_ref:
+            source_refs = [source_ref]
+    lineage: dict[str, Any] = {"source_refs": source_refs if source_refs else ["unknown"]}
+    lineage_obj = record.get("lineage", {})
+    ancestor_raw = lineage_obj.get("ancestor_record_ids", []) if isinstance(lineage_obj, dict) else []
+    if isinstance(ancestor_raw, list):
+        ancestors = [str(x) for x in ancestor_raw if str(x).strip()]
+        if ancestors:
+            lineage["ancestor_record_ids"] = ancestors
+    return lineage
+
+
+def changed_fields(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    keys = sorted(set(before.keys()) | set(after.keys()))
+    out: list[str] = []
+    for key in keys:
+        if before.get(key) != after.get(key):
+            out.append(key)
     return out
 
 
@@ -2871,6 +2913,249 @@ def memory_prime_project(args: argparse.Namespace) -> int:
         return MEMORY_EXIT_INTERNAL
 
 
+def memory_diff_project(args: argparse.Namespace) -> int:
+    command = "memory-diff"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    assets_dir = resolve_assets_dir(getattr(args, "assets_dir", None))
+    records_path, _ = tactical_memory_paths(cortex_dir)
+
+    base_path = Path(args.base_file).resolve() if args.base_file else records_path
+    target_path = Path(args.target_file).resolve() if args.target_file else records_path
+    if not base_path.exists():
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "base_ref": str(base_path),
+                "target_ref": str(target_path),
+                "comparison_keys": MEMORY_DIFF_COMPARISON_KEYS,
+                "ordering_policy": MEMORY_DIFF_ORDERING_POLICY,
+                "summary": {
+                    "added_count": 0,
+                    "removed_count": 0,
+                    "modified_count": 0,
+                    "unchanged_count": 0,
+                },
+                "entries": [],
+            },
+            error={"code": "invalid_arguments", "message": f"base file not found: {base_path}"},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    if not target_path.exists():
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "base_ref": str(base_path),
+                "target_ref": str(target_path),
+                "comparison_keys": MEMORY_DIFF_COMPARISON_KEYS,
+                "ordering_policy": MEMORY_DIFF_ORDERING_POLICY,
+                "summary": {
+                    "added_count": 0,
+                    "removed_count": 0,
+                    "modified_count": 0,
+                    "unchanged_count": 0,
+                },
+                "entries": [],
+            },
+            error={"code": "invalid_arguments", "message": f"target file not found: {target_path}"},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+
+    try:
+        base_records = load_tactical_record_map(base_path)
+        target_records = load_tactical_record_map(target_path)
+
+        try:
+            base_ref = normalize_repo_rel_path(str(base_path.relative_to(project_dir)))
+        except ValueError:
+            base_ref = str(base_path)
+        try:
+            target_ref = normalize_repo_rel_path(str(target_path.relative_to(project_dir)))
+        except ValueError:
+            target_ref = str(target_path)
+
+        all_record_ids = sorted(set(base_records.keys()) | set(target_records.keys()))
+        entries: list[dict[str, Any]] = []
+
+        for record_id in all_record_ids:
+            in_base = record_id in base_records
+            in_target = record_id in target_records
+            if in_target and not in_base:
+                after_obj = target_records[record_id]
+                after_hash = stable_hash_payload(after_obj)
+                entries.append(
+                    {
+                        "change_type": "added",
+                        "record_id": record_id,
+                        "after_hash": after_hash,
+                        "lineage": record_lineage(after_obj),
+                    }
+                )
+                continue
+            if in_base and not in_target:
+                before_obj = base_records[record_id]
+                before_hash = stable_hash_payload(before_obj)
+                entries.append(
+                    {
+                        "change_type": "removed",
+                        "record_id": record_id,
+                        "before_hash": before_hash,
+                        "lineage": record_lineage(before_obj),
+                    }
+                )
+                continue
+
+            before_obj = base_records[record_id]
+            after_obj = target_records[record_id]
+            before_hash = stable_hash_payload(before_obj)
+            after_hash = stable_hash_payload(after_obj)
+            if before_hash == after_hash:
+                entries.append(
+                    {
+                        "change_type": "unchanged",
+                        "record_id": record_id,
+                        "before_hash": before_hash,
+                        "after_hash": after_hash,
+                        "lineage": record_lineage(after_obj),
+                    }
+                )
+            else:
+                entries.append(
+                    {
+                        "change_type": "modified",
+                        "record_id": record_id,
+                        "before_hash": before_hash,
+                        "after_hash": after_hash,
+                        "changed_fields": changed_fields(before_obj, after_obj),
+                        "lineage": record_lineage(after_obj),
+                    }
+                )
+
+        change_order = {
+            "added": 0,
+            "modified": 1,
+            "removed": 2,
+            "unchanged": 3,
+        }
+        entries.sort(
+            key=lambda item: (
+                change_order.get(str(item.get("change_type", "")), 99),
+                str(item.get("record_id", "")),
+            )
+        )
+
+        summary = {
+            "added_count": sum(1 for e in entries if e.get("change_type") == "added"),
+            "removed_count": sum(1 for e in entries if e.get("change_type") == "removed"),
+            "modified_count": sum(1 for e in entries if e.get("change_type") == "modified"),
+            "unchanged_count": sum(1 for e in entries if e.get("change_type") == "unchanged"),
+        }
+
+        result = {
+            "base_ref": base_ref,
+            "target_ref": target_ref,
+            "comparison_keys": MEMORY_DIFF_COMPARISON_KEYS,
+            "ordering_policy": MEMORY_DIFF_ORDERING_POLICY,
+            "summary": summary,
+            "entries": entries,
+        }
+        payload = build_command_response(
+            command=command,
+            status="pass",
+            project_dir=project_dir,
+            result=result,
+        )
+
+        schema_path = resolve_asset_path(assets_dir, MEMORY_DIFF_SCHEMA_REL_PATH)
+        if not schema_path.exists():
+            raise FileNotFoundError(f"missing schema asset: {schema_path}")
+        schema_obj = json.loads(schema_path.read_text(encoding="utf-8"))
+        jsonschema.validate(instance=payload, schema=schema_obj)
+
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_SUCCESS
+    except ValueError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "base_ref": str(base_path),
+                "target_ref": str(target_path),
+                "comparison_keys": MEMORY_DIFF_COMPARISON_KEYS,
+                "ordering_policy": MEMORY_DIFF_ORDERING_POLICY,
+                "summary": {
+                    "added_count": 0,
+                    "removed_count": 0,
+                    "modified_count": 0,
+                    "unchanged_count": 0,
+                },
+                "entries": [],
+            },
+            error={"code": "invalid_arguments", "message": str(exc)},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except jsonschema.ValidationError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "base_ref": str(base_path),
+                "target_ref": str(target_path),
+                "comparison_keys": MEMORY_DIFF_COMPARISON_KEYS,
+                "ordering_policy": MEMORY_DIFF_ORDERING_POLICY,
+                "summary": {
+                    "added_count": 0,
+                    "removed_count": 0,
+                    "modified_count": 0,
+                    "unchanged_count": 0,
+                },
+                "entries": [],
+            },
+            error={
+                "code": "invalid_payload",
+                "message": "diff payload failed schema validation",
+                "details": {"validation_error": exc.message},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except Exception as exc:  # noqa: BLE001
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "base_ref": str(base_path),
+                "target_ref": str(target_path),
+                "comparison_keys": MEMORY_DIFF_COMPARISON_KEYS,
+                "ordering_policy": MEMORY_DIFF_ORDERING_POLICY,
+                "summary": {
+                    "added_count": 0,
+                    "removed_count": 0,
+                    "modified_count": 0,
+                    "unchanged_count": 0,
+                },
+                "entries": [],
+            },
+            error={
+                "code": "internal_error",
+                "message": "unexpected runtime failure during memory-diff",
+                "details": {"exception": str(exc)},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INTERNAL
+
+
 def policy_enable_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     policy_name = args.policy.lower().strip()
@@ -4010,6 +4295,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-record summary char budget (default: 500).",
     )
     p_memory_prime.set_defaults(func=memory_prime_project)
+
+    p_memory_diff = sub.add_parser(
+        "memory-diff",
+        help="Compare tactical record sets/snapshots with deterministic ordering.",
+    )
+    p_memory_diff.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_memory_diff)
+    add_assets_arg(p_memory_diff)
+    p_memory_diff.add_argument("--format", choices=["text", "json"], default="text")
+    p_memory_diff.add_argument(
+        "--base-file",
+        default="",
+        help="Optional JSONL base snapshot path (default: current tactical records file).",
+    )
+    p_memory_diff.add_argument(
+        "--target-file",
+        default="",
+        help="Optional JSONL target snapshot path (default: current tactical records file).",
+    )
+    p_memory_diff.set_defaults(func=memory_diff_project)
 
     p_coach = sub.add_parser("coach", help="Run one AI-guided lifecycle coaching cycle.")
     p_coach.add_argument("--project-dir", required=True)

@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cortex.local/contracts/tactical_memory_diff_schema_v0.json",
+  "title": "Cortex Tactical Memory Diff Schema v0",
+  "description": "Deterministic output contract for memory-diff tactical comparison.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "command",
+    "status",
+    "project_dir",
+    "run_at",
+    "result"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "v0"
+    },
+    "command": {
+      "type": "string",
+      "const": "memory-diff"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail"
+      ]
+    },
+    "project_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_ref",
+        "target_ref",
+        "comparison_keys",
+        "ordering_policy",
+        "summary",
+        "entries"
+      ],
+      "properties": {
+        "base_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "comparison_keys": {
+          "type": "array",
+          "const": [
+            "record_id"
+          ]
+        },
+        "ordering_policy": {
+          "type": "string",
+          "enum": [
+            "change_type_then_record_id_asc"
+          ]
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "added_count",
+            "removed_count",
+            "modified_count",
+            "unchanged_count"
+          ],
+          "properties": {
+            "added_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "removed_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "modified_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unchanged_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "change_type",
+              "record_id",
+              "lineage"
+            ],
+            "properties": {
+              "change_type": {
+                "type": "string",
+                "enum": [
+                  "added",
+                  "removed",
+                  "modified",
+                  "unchanged"
+                ]
+              },
+              "record_id": {
+                "type": "string",
+                "pattern": "^tmr_[a-z0-9][a-z0-9_-]{5,}$"
+              },
+              "before_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8,128}$"
+              },
+              "after_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8,128}$"
+              },
+              "changed_fields": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "lineage": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "source_refs"
+                ],
+                "properties": {
+                  "source_refs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "ancestor_record_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^tmr_[a-z0-9][a-z0-9_-]{5,}$"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "details": {}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "fail"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "error"
+        ]
+      }
+    }
+  ]
+}

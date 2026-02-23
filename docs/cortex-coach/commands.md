@@ -8,7 +8,7 @@ Common option:
 
 ## Tactical Memory Commands (Phase 1)
 
-`memory-record`, `memory-search`, and `memory-prime` are implemented. The remaining tactical memory
+`memory-record`, `memory-search`, `memory-prime`, and `memory-diff` are implemented. The remaining tactical memory
 commands are still pending.
 
 ### `memory-record`
@@ -99,6 +99,23 @@ Output includes deterministic truncation metadata:
 - `truncation.dropped_record_ids`
 - `truncation.truncated_record_count`
 - `truncation.truncated_char_count`
+
+### `memory-diff`
+
+Compare two tactical-record JSONL snapshots (or current vs current by default) and emit
+deterministic change entries using key `record_id`.
+
+```bash
+cortex-coach memory-diff \
+  --project-dir /path/to/project \
+  --base-file .cortex/reports/diff_base_snapshot.jsonl \
+  --target-file .cortex/state/tactical_memory/records_v0.jsonl \
+  --format json
+```
+
+Ordering policy:
+- `change_type_then_record_id_asc`
+- change type order: `added`, `modified`, `removed`, `unchanged`
 
 ## `init`
 
