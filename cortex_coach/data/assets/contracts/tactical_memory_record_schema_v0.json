@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cortex.local/contracts/tactical_memory_record_schema_v0.json",
+  "title": "Cortex Tactical Memory Record Schema v0",
+  "description": "Normalized record contract for memory-record tactical capture.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "record_id",
+    "captured_at",
+    "source",
+    "provenance",
+    "content",
+    "policy",
+    "sanitization",
+    "write_lock"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "v0"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^tmr_[a-z0-9][a-z0-9_-]{5,}$"
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_kind",
+        "source_ref",
+        "captured_by"
+      ],
+      "properties": {
+        "source_kind": {
+          "type": "string",
+          "enum": [
+            "manual_capture",
+            "context_hydration",
+            "adapter_signal",
+            "derived_summary",
+            "imported"
+          ]
+        },
+        "source_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "captured_by": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin_command",
+        "source_refs"
+      ],
+      "properties": {
+        "origin_command": {
+          "type": "string",
+          "const": "memory-record"
+        },
+        "source_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "git_head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        },
+        "adapter_fetched_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "content_class",
+        "tags"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content_class": {
+          "type": "string",
+          "enum": [
+            "governance_context",
+            "implementation_note",
+            "decision_signal",
+            "risk_note",
+            "task_state",
+            "reference_excerpt",
+            "incident_note"
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.:-]{0,63}$"
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ttl_expires_at",
+        "retention_class"
+      ],
+      "properties": {
+        "ttl_expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "retention_class": {
+          "type": "string",
+          "enum": [
+            "short",
+            "standard",
+            "extended"
+          ]
+        }
+      }
+    },
+    "sanitization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "redaction_actions"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "redacted",
+            "blocked"
+          ]
+        },
+        "redaction_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "reason_class",
+              "field_path"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "remove",
+                  "mask",
+                  "truncate"
+                ]
+              },
+              "reason_class": {
+                "type": "string",
+                "enum": [
+                  "secret",
+                  "credential",
+                  "pii",
+                  "regulated_restricted",
+                  "other_policy_violation"
+                ]
+              },
+              "field_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "write_lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lock_id",
+        "lock_acquired_at",
+        "lock_timeout_seconds"
+      ],
+      "properties": {
+        "lock_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lock_acquired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lock_timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "lock_stale_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "force_unlock": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

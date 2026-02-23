@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from fnmatch import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,71 @@ DEFAULT_CORTEX_AUDIT_SCAN_DIRS = [
 DECISION_CANDIDATES_FILE = ".cortex/reports/decision_candidates_v0.json"
 DECISION_ARTIFACTS_DIR = ".cortex/artifacts/decisions"
 DEFAULT_CONTRACT_FILE = "contracts/coach_asset_contract_v0.json"
+MEMORY_COMMAND_VERSION = "v0"
+MEMORY_RECORD_SCHEMA_REL_PATH = "contracts/tactical_memory_record_schema_v0.json"
+TACTICAL_MEMORY_RECORDS_REL_PATH = "state/tactical_memory/records_v0.jsonl"
+TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH = "state/tactical_memory/sanitization_incidents_v0.jsonl"
+MEMORY_EXIT_SUCCESS = 0
+MEMORY_EXIT_INVALID = 2
+MEMORY_EXIT_POLICY = 3
+MEMORY_EXIT_LOCK = 4
+MEMORY_EXIT_INTERNAL = 5
+MEMORY_RETENTION_TTL_DAYS = {
+    "short": 7,
+    "standard": 30,
+    "extended": 90,
+}
+MEMORY_SOURCE_KIND_CHOICES = [
+    "manual_capture",
+    "context_hydration",
+    "adapter_signal",
+    "derived_summary",
+    "imported",
+]
+MEMORY_CONTENT_CLASS_CHOICES = [
+    "governance_context",
+    "implementation_note",
+    "decision_signal",
+    "risk_note",
+    "task_state",
+    "reference_excerpt",
+    "incident_note",
+]
+MEMORY_POLICY_BLOCK_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
+    (
+        "private_key_material",
+        "credential",
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    ),
+]
+MEMORY_POLICY_REDACTION_PATTERNS: list[tuple[str, str, re.Pattern[str], str]] = [
+    (
+        "secret_token_assignment",
+        "secret",
+        re.compile(
+            r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret)\b\s*[:=]\s*[^\s,;]+"
+        ),
+        "[REDACTED_SECRET]",
+    ),
+    (
+        "credential_assignment",
+        "credential",
+        re.compile(r"(?i)\b(password|passwd|pwd|session[_-]?cookie)\b\s*[:=]\s*[^\s,;]+"),
+        "[REDACTED_CREDENTIAL]",
+    ),
+    (
+        "pii_email",
+        "pii",
+        re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
+        "[REDACTED_EMAIL]",
+    ),
+    (
+        "pii_ssn",
+        "pii",
+        re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+        "[REDACTED_SSN]",
+    ),
+]
 
 
 def resolve_cortex_dir(project_dir: Path, raw_cortex_root: str | None) -> Path:
@@ -259,6 +325,173 @@ def parse_csv_list(raw: str | None) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def parse_rfc3339_utc(raw: str, field: str) -> datetime:
+    text = raw.strip()
+    if not text:
+        raise ValueError(f"{field} is required")
+    try:
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        dt = datetime.fromisoformat(text)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"{field} must be RFC3339 date-time") from exc
+    if dt.tzinfo is None:
+        raise ValueError(f"{field} must include timezone offset")
+    return dt.astimezone(timezone.utc)
+
+
+def parse_optional_rfc3339_utc(raw: str | None, field: str) -> str | None:
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    return parse_rfc3339_utc(value, field).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stable_hash_payload(payload: dict[str, Any]) -> str:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def parse_unique_sorted_csv(raw: str | None) -> list[str]:
+    return sorted(set(parse_csv_list(raw)))
+
+
+def tactical_memory_paths(cortex_dir: Path) -> tuple[Path, Path]:
+    records_path = cortex_dir / TACTICAL_MEMORY_RECORDS_REL_PATH
+    incidents_path = cortex_dir / TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH
+    records_path.parent.mkdir(parents=True, exist_ok=True)
+    incidents_path.parent.mkdir(parents=True, exist_ok=True)
+    return records_path, incidents_path
+
+
+def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(payload, sort_keys=True) + "\n"
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def tactical_record_exists(records_path: Path, record_id: str) -> bool:
+    if not records_path.exists():
+        return False
+    for raw in records_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(obj, dict) and obj.get("record_id") == record_id:
+            return True
+    return False
+
+
+def detect_git_head(project_dir: Path) -> str | None:
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{7,40}", out):
+        return out
+    return None
+
+
+def sanitize_tactical_text(text: str) -> tuple[str, str, list[dict[str, str]], list[dict[str, str]]]:
+    blocked_hits: list[dict[str, str]] = []
+    for pattern_id, reason_class, pattern in MEMORY_POLICY_BLOCK_PATTERNS:
+        if pattern.search(text):
+            blocked_hits.append(
+                {
+                    "pattern_id": pattern_id,
+                    "reason_class": reason_class,
+                    "field_path": "content.text",
+                }
+            )
+    if blocked_hits:
+        actions: list[dict[str, str]] = []
+        for hit in blocked_hits:
+            actions.append(
+                {
+                    "action": "remove",
+                    "reason_class": hit["reason_class"],
+                    "field_path": hit["field_path"],
+                    "note": f"blocked_pattern:{hit['pattern_id']}",
+                }
+            )
+        return text, "blocked", actions, blocked_hits
+
+    working = text
+    redaction_actions: list[dict[str, str]] = []
+    for pattern_id, reason_class, pattern, replacement in MEMORY_POLICY_REDACTION_PATTERNS:
+        updated, count = pattern.subn(replacement, working)
+        if count <= 0:
+            continue
+        working = updated
+        redaction_actions.append(
+            {
+                "action": "mask",
+                "reason_class": reason_class,
+                "field_path": "content.text",
+                "note": f"pattern:{pattern_id};matches:{count}",
+            }
+        )
+
+    if redaction_actions:
+        return working, "redacted", redaction_actions, []
+    return text, "clean", [], []
+
+
+def emit_command_payload(payload: dict[str, Any], output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print(f"command: {payload.get('command')}")
+    print(f"status: {payload.get('status')}")
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for key in sorted(result):
+            value = result[key]
+            if isinstance(value, (dict, list)):
+                print(f"{key}: {json.dumps(value, sort_keys=True)}")
+            else:
+                print(f"{key}: {value}")
+    err = payload.get("error")
+    if isinstance(err, dict):
+        print(f"error_code: {err.get('code')}")
+        print(f"error_message: {err.get('message')}")
+
+
+def build_command_response(
+    command: str,
+    status: str,
+    project_dir: Path,
+    result: dict[str, Any],
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "version": MEMORY_COMMAND_VERSION,
+        "command": command,
+        "status": status,
+        "project_dir": str(project_dir),
+        "run_at": utc_now(),
+        "result": result,
+    }
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
 def read_manifest_project_id(project_dir: Path) -> str | None:
     manifest = project_dir / ".cortex" / MANIFEST_FILE
     if not manifest.exists():
@@ -422,11 +655,12 @@ def project_lock(
     while not acquired:
         try:
             fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            lock_acquired_at = utc_now()
             payload = {
                 "token": token,
                 "pid": os.getpid(),
                 "created_epoch": time.time(),
-                "created_at": utc_now(),
+                "created_at": lock_acquired_at,
                 "command": command_name,
             }
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -452,7 +686,11 @@ def project_lock(
             time.sleep(0.1)
 
     try:
-        yield
+        yield {
+            "lock_id": token,
+            "lock_acquired_at": lock_acquired_at,
+            "lock_file": str(lock_path),
+        }
     finally:
         owner = _read_lock_metadata(lock_path)
         if owner.get("token") == token:
@@ -1832,6 +2070,262 @@ def context_policy_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def memory_record_project(args: argparse.Namespace) -> int:
+    command = "memory-record"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    assets_dir = resolve_assets_dir(getattr(args, "assets_dir", None))
+    records_path, incidents_path = tactical_memory_paths(cortex_dir)
+    try:
+        records_rel = normalize_repo_rel_path(str(records_path.relative_to(project_dir)))
+    except ValueError:
+        records_rel = str(records_path)
+    try:
+        incidents_rel = normalize_repo_rel_path(str(incidents_path.relative_to(project_dir)))
+    except ValueError:
+        incidents_rel = str(incidents_path)
+
+    source_refs = parse_unique_sorted_csv(args.source_refs)
+    tags = parse_unique_sorted_csv(args.tags)
+    if not source_refs:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={"record_id": None},
+            error={
+                "code": "invalid_arguments",
+                "message": "--source-refs must include at least one source reference",
+                "details": {"field": "source_refs"},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+
+    try:
+        captured_dt = (
+            parse_rfc3339_utc(args.captured_at, "captured_at")
+            if args.captured_at
+            else datetime.now(timezone.utc)
+        )
+        captured_at = captured_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if args.ttl_expires_at:
+            ttl_dt = parse_rfc3339_utc(args.ttl_expires_at, "ttl_expires_at")
+        else:
+            ttl_dt = captured_dt + timedelta(days=MEMORY_RETENTION_TTL_DAYS[args.retention_class])
+        if ttl_dt <= captured_dt:
+            raise ValueError("ttl_expires_at must be after captured_at")
+        ttl_expires_at = ttl_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        adapter_fetched_at = parse_optional_rfc3339_utc(args.adapter_fetched_at, "adapter_fetched_at")
+        source_updated_at = parse_optional_rfc3339_utc(args.source_updated_at, "source_updated_at")
+    except ValueError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={"record_id": None},
+            error={
+                "code": "invalid_arguments",
+                "message": str(exc),
+                "details": {"field": "timestamp"},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+
+    sanitized_text, sanitization_status, redaction_actions, blocked_hits = sanitize_tactical_text(args.text)
+
+    provenance: dict[str, Any] = {
+        "origin_command": command,
+        "source_refs": source_refs,
+    }
+    git_head = args.git_head.strip() if args.git_head else detect_git_head(project_dir)
+    if git_head:
+        provenance["git_head"] = git_head
+    if adapter_fetched_at:
+        provenance["adapter_fetched_at"] = adapter_fetched_at
+    if source_updated_at:
+        provenance["source_updated_at"] = source_updated_at
+
+    base_record: dict[str, Any] = {
+        "version": MEMORY_COMMAND_VERSION,
+        "captured_at": captured_at,
+        "source": {
+            "source_kind": args.source_kind,
+            "source_ref": args.source_ref,
+            "captured_by": args.captured_by,
+        },
+        "provenance": provenance,
+        "content": {
+            "text": sanitized_text,
+            "content_class": args.content_class,
+            "tags": tags,
+        },
+        "policy": {
+            "ttl_expires_at": ttl_expires_at,
+            "retention_class": args.retention_class,
+        },
+        "sanitization": {
+            "status": sanitization_status,
+            "redaction_actions": redaction_actions,
+        },
+    }
+    record_id = f"tmr_{stable_hash_payload(base_record)[:16]}"
+
+    schema_path = resolve_asset_path(assets_dir, MEMORY_RECORD_SCHEMA_REL_PATH)
+    if not schema_path.exists():
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={"record_id": record_id},
+            error={
+                "code": "internal_error",
+                "message": f"missing schema asset: {schema_path}",
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INTERNAL
+
+    if sanitization_status == "blocked":
+        incident_payload = {
+            "version": MEMORY_COMMAND_VERSION,
+            "incident_id": f"sani_{stable_hash_payload({'record_id': record_id, 'hits': blocked_hits})[:16]}",
+            "record_id": record_id,
+            "command": command,
+            "captured_at": captured_at,
+            "source_ref": args.source_ref,
+            "blocked_hits": blocked_hits,
+            "run_at": utc_now(),
+        }
+        try:
+            append_jsonl(incidents_path, incident_payload)
+        except Exception as exc:  # noqa: BLE001
+            payload = build_command_response(
+                command=command,
+                status="fail",
+                project_dir=project_dir,
+                result={"record_id": record_id},
+                error={
+                    "code": "internal_error",
+                    "message": "failed to persist blocked sanitization incident",
+                    "details": {"exception": str(exc)},
+                },
+            )
+            emit_command_payload(payload, args.format)
+            return MEMORY_EXIT_INTERNAL
+
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "record_id": record_id,
+                "persisted": False,
+                "storage_path": records_rel,
+                "sanitization_status": "blocked",
+                "redaction_actions": redaction_actions,
+                "incident_id": incident_payload["incident_id"],
+                "incident_path": incidents_rel,
+            },
+            error={
+                "code": "policy_violation",
+                "message": "payload blocked by tactical data policy sanitization controls",
+                "details": {"blocked_hits": blocked_hits},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_POLICY
+
+    try:
+        with project_lock(
+            project_dir=project_dir,
+            cortex_root=getattr(args, "cortex_root", None),
+            lock_timeout_seconds=args.lock_timeout_seconds,
+            lock_stale_seconds=args.lock_stale_seconds,
+            force_unlock=args.force_unlock,
+            command_name=command,
+        ) as lock_info:
+            write_lock = {
+                "lock_id": str(lock_info.get("lock_id", "")),
+                "lock_acquired_at": str(lock_info.get("lock_acquired_at", utc_now())),
+                "lock_timeout_seconds": float(args.lock_timeout_seconds),
+                "lock_stale_seconds": float(args.lock_stale_seconds),
+                "force_unlock": bool(args.force_unlock),
+            }
+            record = {
+                **base_record,
+                "record_id": record_id,
+                "write_lock": write_lock,
+            }
+
+            schema_obj = json.loads(schema_path.read_text(encoding="utf-8"))
+            jsonschema.validate(instance=record, schema=schema_obj)
+
+            persisted = False
+            if not tactical_record_exists(records_path, record_id):
+                append_jsonl(records_path, record)
+                persisted = True
+
+            payload = build_command_response(
+                command=command,
+                status="pass",
+                project_dir=project_dir,
+                result={
+                    "record_id": record_id,
+                    "persisted": persisted,
+                    "storage_path": records_rel,
+                    "sanitization_status": sanitization_status,
+                    "redaction_actions": redaction_actions,
+                    "retention_class": args.retention_class,
+                    "ttl_expires_at": ttl_expires_at,
+                },
+            )
+            emit_command_payload(payload, args.format)
+            return MEMORY_EXIT_SUCCESS
+    except RuntimeError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={"record_id": record_id, "persisted": False},
+            error={
+                "code": "lock_conflict",
+                "message": str(exc),
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_LOCK
+    except jsonschema.ValidationError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={"record_id": record_id, "persisted": False},
+            error={
+                "code": "invalid_payload",
+                "message": "record failed schema validation",
+                "details": {"validation_error": exc.message},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except Exception as exc:  # noqa: BLE001
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={"record_id": record_id, "persisted": False},
+            error={
+                "code": "internal_error",
+                "message": "unexpected runtime failure during memory-record",
+                "details": {"exception": str(exc)},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INTERNAL
+
+
 def policy_enable_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     policy_name = args.policy.lower().strip()
@@ -2888,6 +3382,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_contract_check.add_argument("--format", choices=["text", "json"], default="text")
     p_contract_check.add_argument("--out-file")
     p_contract_check.set_defaults(func=contract_check_project)
+
+    p_memory_record = sub.add_parser(
+        "memory-record",
+        help="Capture and persist a tactical memory record with policy sanitization.",
+    )
+    p_memory_record.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_memory_record)
+    add_assets_arg(p_memory_record)
+    p_memory_record.add_argument("--format", choices=["text", "json"], default="text")
+    p_memory_record.add_argument("--captured-at", help="Optional RFC3339 timestamp override for capture time.")
+    p_memory_record.add_argument(
+        "--source-kind",
+        required=True,
+        choices=MEMORY_SOURCE_KIND_CHOICES,
+    )
+    p_memory_record.add_argument("--source-ref", required=True)
+    p_memory_record.add_argument("--captured-by", default="cortex-coach")
+    p_memory_record.add_argument(
+        "--source-refs",
+        required=True,
+        help="Comma-separated provenance source references (min 1).",
+    )
+    p_memory_record.add_argument("--git-head", default="", help="Optional explicit git head SHA.")
+    p_memory_record.add_argument("--adapter-fetched-at", default="", help="Optional RFC3339 adapter fetch time.")
+    p_memory_record.add_argument("--source-updated-at", default="", help="Optional RFC3339 source update time.")
+    p_memory_record.add_argument("--text", required=True, help="Record body text.")
+    p_memory_record.add_argument("--content-class", required=True, choices=MEMORY_CONTENT_CLASS_CHOICES)
+    p_memory_record.add_argument("--tags", default="", help="Optional comma-separated tag list.")
+    p_memory_record.add_argument(
+        "--retention-class",
+        choices=sorted(MEMORY_RETENTION_TTL_DAYS.keys()),
+        default="standard",
+    )
+    p_memory_record.add_argument("--ttl-expires-at", default="", help="Optional RFC3339 TTL expiry override.")
+    add_lock_args(p_memory_record)
+    p_memory_record.set_defaults(func=memory_record_project)
 
     p_coach = sub.add_parser("coach", help="Run one AI-guided lifecycle coaching cycle.")
     p_coach.add_argument("--project-dir", required=True)

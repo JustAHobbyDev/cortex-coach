@@ -6,6 +6,45 @@ Fallback: `uv run python3 scripts/cortex_project_coach_v0.py ...`
 Common option:
 - `--assets-dir /path/to/cortex-assets` to load contract/schema/vocabulary assets from an external Cortex asset root.
 
+## Tactical Memory Commands (Phase 1)
+
+`memory-record` is implemented. The rest of the tactical memory family is still pending.
+
+### `memory-record`
+
+Capture one tactical record, enforce sanitization policy controls, and persist to:
+- `.cortex/state/tactical_memory/records_v0.jsonl`
+- blocked sanitization incidents: `.cortex/state/tactical_memory/sanitization_incidents_v0.jsonl`
+
+```bash
+cortex-coach memory-record \
+  --project-dir /path/to/project \
+  --source-kind manual_capture \
+  --source-ref session://local \
+  --captured-by cortex-coach \
+  --source-refs session://local \
+  --text "Implemented lock timeout handling." \
+  --content-class implementation_note \
+  --tags phase1,lock \
+  --format json
+```
+
+Key options:
+- `--captured-at <RFC3339>` optional; defaults to current UTC
+- `--ttl-expires-at <RFC3339>` optional; defaults by retention class
+- `--retention-class short|standard|extended` (default `standard`)
+- mutation lock controls:
+  - `--lock-timeout-seconds`
+  - `--lock-stale-seconds`
+  - `--force-unlock`
+
+Exit codes:
+- `0` success
+- `2` invalid arguments/payload shape
+- `3` policy violation (blocked sanitization)
+- `4` lock conflict/timeout
+- `5` internal runtime failure
+
 ## `init`
 
 Bootstrap `.cortex/` artifacts in a target project.
