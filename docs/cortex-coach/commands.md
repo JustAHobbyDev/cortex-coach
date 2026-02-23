@@ -8,7 +8,7 @@ Common option:
 
 ## Tactical Memory Commands (Phase 1)
 
-`memory-record`, `memory-search`, `memory-prime`, and `memory-diff` are implemented. The remaining tactical memory
+`memory-record`, `memory-search`, `memory-prime`, `memory-diff`, and `memory-prune` are implemented. The remaining tactical memory
 commands are still pending.
 
 ### `memory-record`
@@ -116,6 +116,32 @@ cortex-coach memory-diff \
 Ordering policy:
 - `change_type_then_record_id_asc`
 - change type order: `added`, `modified`, `removed`, `unchanged`
+
+### `memory-prune`
+
+Prune tactical records by policy-bounded criteria. Command defaults to dry-run mode.
+
+```bash
+cortex-coach memory-prune \
+  --project-dir /path/to/project \
+  --expired-before 2026-03-01T00:00:00Z \
+  --policy-violation-classes-any secret,credential \
+  --dry-run \
+  --format json
+```
+
+Apply changes (non-dry-run):
+
+```bash
+cortex-coach memory-prune \
+  --project-dir /path/to/project \
+  --expired-before 2026-03-01T00:00:00Z \
+  --no-dry-run \
+  --format json
+```
+
+Ordering policy:
+- `decision_then_record_id_asc` (`prune` before `skip`)
 
 ## `init`
 

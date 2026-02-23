@@ -88,6 +88,7 @@ MEMORY_RECORD_SCHEMA_REL_PATH = "contracts/tactical_memory_record_schema_v0.json
 MEMORY_SEARCH_SCHEMA_REL_PATH = "contracts/tactical_memory_search_result_schema_v0.json"
 MEMORY_PRIME_SCHEMA_REL_PATH = "contracts/tactical_memory_prime_bundle_schema_v0.json"
 MEMORY_DIFF_SCHEMA_REL_PATH = "contracts/tactical_memory_diff_schema_v0.json"
+MEMORY_PRUNE_SCHEMA_REL_PATH = "contracts/tactical_memory_prune_schema_v0.json"
 TACTICAL_MEMORY_RECORDS_REL_PATH = "state/tactical_memory/records_v0.jsonl"
 TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH = "state/tactical_memory/sanitization_incidents_v0.jsonl"
 MEMORY_EXIT_SUCCESS = 0
@@ -124,6 +125,14 @@ MEMORY_SEARCH_TIE_BREAK_ORDER = [
 MEMORY_PRIME_ORDERING_POLICY = "relevance_desc_then_recency_desc_then_record_id_asc"
 MEMORY_DIFF_ORDERING_POLICY = "change_type_then_record_id_asc"
 MEMORY_DIFF_COMPARISON_KEYS = ["record_id"]
+MEMORY_PRUNE_ORDERING_POLICY = "decision_then_record_id_asc"
+MEMORY_POLICY_VIOLATION_CLASSES = [
+    "secret",
+    "credential",
+    "pii",
+    "regulated_restricted",
+    "other_policy_violation",
+]
 MEMORY_POLICY_BLOCK_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     (
         "private_key_material",
@@ -446,6 +455,12 @@ def load_tactical_record_map(records_path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
+def write_tactical_records(records_path: Path, records: list[dict[str, Any]]) -> None:
+    lines = [json.dumps(record, sort_keys=True) for record in records]
+    content = ("\n".join(lines) + "\n") if lines else ""
+    atomic_write_text(records_path, content)
+
+
 def record_lineage(record: dict[str, Any]) -> dict[str, Any]:
     provenance_obj = record.get("provenance", {})
     source_refs_raw = provenance_obj.get("source_refs", [])
@@ -472,6 +487,21 @@ def changed_fields(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     for key in keys:
         if before.get(key) != after.get(key):
             out.append(key)
+    return out
+
+
+def record_policy_violation_classes(record: dict[str, Any]) -> set[str]:
+    sanitization = record.get("sanitization", {})
+    actions = sanitization.get("redaction_actions", []) if isinstance(sanitization, dict) else []
+    out: set[str] = set()
+    if not isinstance(actions, list):
+        return out
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        reason = str(action.get("reason_class", "")).strip()
+        if reason:
+            out.add(reason)
     return out
 
 
@@ -3156,6 +3186,182 @@ def memory_diff_project(args: argparse.Namespace) -> int:
         return MEMORY_EXIT_INTERNAL
 
 
+def memory_prune_project(args: argparse.Namespace) -> int:
+    command = "memory-prune"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    assets_dir = resolve_assets_dir(getattr(args, "assets_dir", None))
+    records_path, _ = tactical_memory_paths(cortex_dir)
+
+    retention_classes_any = parse_unique_sorted_csv(args.retention_classes_any)
+    policy_violation_classes_any = parse_unique_sorted_csv(args.policy_violation_classes_any)
+
+    result_template: dict[str, Any] = {
+        "dry_run": bool(args.dry_run),
+        "criteria": {
+            "expired_before": args.expired_before,
+            "retention_classes_any": retention_classes_any,
+            "policy_violation_classes_any": policy_violation_classes_any,
+        },
+        "ordering_policy": MEMORY_PRUNE_ORDERING_POLICY,
+        "summary": {
+            "candidate_count": 0,
+            "pruned_count": 0,
+            "skipped_count": 0,
+        },
+        "actions": [],
+    }
+
+    try:
+        expired_before_dt = parse_rfc3339_utc(args.expired_before, "expired_before")
+        invalid_retention = [x for x in retention_classes_any if x not in MEMORY_RETENTION_TTL_DAYS]
+        if invalid_retention:
+            raise ValueError(f"invalid retention classes: {','.join(invalid_retention)}")
+        invalid_policy = [x for x in policy_violation_classes_any if x not in MEMORY_POLICY_VIOLATION_CLASSES]
+        if invalid_policy:
+            raise ValueError(f"invalid policy violation classes: {','.join(invalid_policy)}")
+
+        with project_lock(
+            project_dir=project_dir,
+            cortex_root=getattr(args, "cortex_root", None),
+            lock_timeout_seconds=args.lock_timeout_seconds,
+            lock_stale_seconds=args.lock_stale_seconds,
+            force_unlock=args.force_unlock,
+            command_name=command,
+        ):
+            records = load_tactical_records(records_path)
+            records.sort(key=lambda r: str(r.get("record_id", "")))
+
+            actions: list[dict[str, Any]] = []
+            for record in records:
+                record_id = str(record.get("record_id", "")).strip()
+                if not record_id:
+                    continue
+
+                policy_obj = record.get("policy", {})
+                retention_class = str(policy_obj.get("retention_class", "")).strip()
+                if retention_classes_any and retention_class not in retention_classes_any:
+                    continue
+
+                ttl_expires_at = str(policy_obj.get("ttl_expires_at", "")).strip()
+                try:
+                    ttl_dt = parse_rfc3339_utc(ttl_expires_at, "ttl_expires_at")
+                except ValueError:
+                    ttl_dt = datetime.fromtimestamp(0, tz=timezone.utc)
+                expired = ttl_dt < expired_before_dt
+
+                violations = record_policy_violation_classes(record)
+                matched_policy_violations = sorted(violations.intersection(policy_violation_classes_any))
+
+                if not expired and not matched_policy_violations:
+                    continue
+
+                prune_reason = "expired_ttl" if expired else "policy_violation"
+                content_obj = record.get("content", {})
+                tags_raw = content_obj.get("tags", [])
+                tags = {str(x) for x in tags_raw} if isinstance(tags_raw, list) else set()
+                linked_dependency = "governance_linked" in tags and not expired
+
+                if args.dry_run:
+                    decision = "skip"
+                    reason = "dry_run_only"
+                elif linked_dependency:
+                    decision = "skip"
+                    reason = "linked_governance_dependency"
+                else:
+                    decision = "prune"
+                    reason = prune_reason
+
+                actions.append(
+                    {
+                        "record_id": record_id,
+                        "decision": decision,
+                        "reason": reason,
+                        "lineage": record_lineage(record),
+                    }
+                )
+
+            decision_order = {"prune": 0, "skip": 1}
+            actions.sort(key=lambda a: (decision_order.get(str(a.get("decision", "")), 99), str(a.get("record_id", ""))))
+
+            prune_ids = {str(a["record_id"]) for a in actions if a.get("decision") == "prune"}
+            if not args.dry_run and prune_ids:
+                remaining = [record for record in records if str(record.get("record_id", "")) not in prune_ids]
+                write_tactical_records(records_path, remaining)
+
+            summary = {
+                "candidate_count": len(actions),
+                "pruned_count": 0 if args.dry_run else sum(1 for a in actions if a.get("decision") == "prune"),
+                "skipped_count": len(actions) if args.dry_run else sum(1 for a in actions if a.get("decision") == "skip"),
+            }
+            result_template["summary"] = summary
+            result_template["actions"] = actions
+
+        payload = build_command_response(
+            command=command,
+            status="pass",
+            project_dir=project_dir,
+            result=result_template,
+        )
+
+        schema_path = resolve_asset_path(assets_dir, MEMORY_PRUNE_SCHEMA_REL_PATH)
+        if not schema_path.exists():
+            raise FileNotFoundError(f"missing schema asset: {schema_path}")
+        schema_obj = json.loads(schema_path.read_text(encoding="utf-8"))
+        jsonschema.validate(instance=payload, schema=schema_obj)
+
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_SUCCESS
+    except RuntimeError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={"code": "lock_conflict", "message": str(exc)},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_LOCK
+    except ValueError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={"code": "invalid_arguments", "message": str(exc)},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except jsonschema.ValidationError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "invalid_payload",
+                "message": "prune payload failed schema validation",
+                "details": {"validation_error": exc.message},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except Exception as exc:  # noqa: BLE001
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "internal_error",
+                "message": "unexpected runtime failure during memory-prune",
+                "details": {"exception": str(exc)},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INTERNAL
+
+
 def policy_enable_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     policy_name = args.policy.lower().strip()
@@ -4315,6 +4521,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSONL target snapshot path (default: current tactical records file).",
     )
     p_memory_diff.set_defaults(func=memory_diff_project)
+
+    p_memory_prune = sub.add_parser(
+        "memory-prune",
+        help="Prune tactical records by TTL/policy criteria (dry-run by default).",
+    )
+    p_memory_prune.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_memory_prune)
+    add_assets_arg(p_memory_prune)
+    p_memory_prune.add_argument("--format", choices=["text", "json"], default="text")
+    p_memory_prune.add_argument(
+        "--expired-before",
+        required=True,
+        help="RFC3339 timestamp: records expiring before this are eligible.",
+    )
+    p_memory_prune.add_argument(
+        "--retention-classes-any",
+        default="",
+        help="Optional comma-separated retention class filter (short,standard,extended).",
+    )
+    p_memory_prune.add_argument(
+        "--policy-violation-classes-any",
+        default="",
+        help="Optional comma-separated policy violation class filter.",
+    )
+    p_memory_prune.add_argument(
+        "--dry-run",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Dry-run mode (default: true). Use --no-dry-run to apply pruning.",
+    )
+    add_lock_args(p_memory_prune)
+    p_memory_prune.set_defaults(func=memory_prune_project)
 
     p_coach = sub.add_parser("coach", help="Run one AI-guided lifecycle coaching cycle.")
     p_coach.add_argument("--project-dir", required=True)
