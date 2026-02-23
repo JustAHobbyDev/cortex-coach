@@ -8,8 +8,13 @@ Common option:
 
 ## Tactical Memory Commands (Phase 1)
 
-`memory-record`, `memory-search`, `memory-prime`, `memory-diff`, and `memory-prune` are implemented. The remaining tactical memory
-commands are still pending.
+All Phase 1 tactical memory commands are implemented:
+- `memory-record`
+- `memory-search`
+- `memory-prime`
+- `memory-diff`
+- `memory-prune`
+- `memory-promote`
 
 ### `memory-record`
 
@@ -142,6 +147,41 @@ cortex-coach memory-prune \
 
 Ordering policy:
 - `decision_then_record_id_asc` (`prune` before `skip`)
+
+### `memory-promote`
+
+Bridge tactical records to promotion-contract candidates.
+
+Governance-impacting mode (fail-closed on missing required linkage/evidence metadata):
+
+```bash
+cortex-coach memory-promote \
+  --project-dir /path/to/project \
+  --record-ids tmr_abcd1234 \
+  --bridge-mode governance_impacting \
+  --decision-refs dec_001 \
+  --reflection-refs ref_001 \
+  --impacted-artifacts specs/demo.md::updated-governance-flow \
+  --rationale-summary "Promote tested governance update." \
+  --evidence-refs evidence://demo \
+  --reviewed-by maintainer_a \
+  --format json
+```
+
+Non-governance mode (explicitly non-canonical):
+
+```bash
+cortex-coach memory-promote \
+  --project-dir /path/to/project \
+  --record-ids tmr_abcd1234 \
+  --bridge-mode non_governance \
+  --format json
+```
+
+Bridge guarantees:
+- governance mode fails closed when required promotion sections are missing
+- bridge metadata sets `bridge_command=memory-promote`
+- non-governance output is explicitly marked to prevent canonical closure confusion
 
 ## `init`
 

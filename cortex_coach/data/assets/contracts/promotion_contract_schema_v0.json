@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cortex.local/contracts/promotion_contract_schema_v0.json",
+  "title": "Cortex Promotion Contract v0",
+  "description": "Machine-readable contract required to promote tactical outputs into canonical governance artifacts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "promotion_id",
+    "decision_reflection_linkage",
+    "impacted_artifacts",
+    "rationale_evidence_summary",
+    "promotion_trace_metadata"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "v0"
+    },
+    "promotion_id": {
+      "type": "string",
+      "minLength": 3
+    },
+    "decision_reflection_linkage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_refs",
+        "reflection_refs"
+      ],
+      "properties": {
+        "decision_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "reflection_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "impacted_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifact_path",
+          "change_summary"
+        ],
+        "properties": {
+          "artifact_path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "change_summary": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "rationale_evidence_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rationale_summary",
+        "evidence_refs"
+      ],
+      "properties": {
+        "rationale_summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "promotion_trace_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_by",
+        "requested_at",
+        "reviewed_by",
+        "approved_at",
+        "approval_state",
+        "source_trace"
+      ],
+      "properties": {
+        "requested_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reviewed_by": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "approved_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "approval_state": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "approved",
+            "rejected"
+          ]
+        },
+        "source_trace": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_kind",
+            "source_refs"
+          ],
+          "properties": {
+            "source_kind": {
+              "type": "string",
+              "enum": [
+                "tactical_record",
+                "adapter_signal",
+                "mixed"
+              ]
+            },
+            "source_refs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "bridge_command": {
+          "type": "string",
+          "enum": [
+            "memory-promote"
+          ]
+        },
+        "bridge_mode": {
+          "type": "string",
+          "enum": [
+            "governance_impacting",
+            "non_governance"
+          ]
+        },
+        "tactical_record_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^tmr_[a-z0-9][a-z0-9_-]{5,}$"
+          }
+        },
+        "bridge_validation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required_fields_complete",
+            "failure_mode"
+          ],
+          "properties": {
+            "required_fields_complete": {
+              "type": "boolean"
+            },
+            "failure_mode": {
+              "type": "string",
+              "enum": [
+                "none",
+                "missing_decision_reflection_linkage",
+                "missing_impacted_artifacts",
+                "missing_rationale_evidence_summary",
+                "missing_promotion_trace_metadata"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

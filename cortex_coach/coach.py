@@ -89,6 +89,7 @@ MEMORY_SEARCH_SCHEMA_REL_PATH = "contracts/tactical_memory_search_result_schema_
 MEMORY_PRIME_SCHEMA_REL_PATH = "contracts/tactical_memory_prime_bundle_schema_v0.json"
 MEMORY_DIFF_SCHEMA_REL_PATH = "contracts/tactical_memory_diff_schema_v0.json"
 MEMORY_PRUNE_SCHEMA_REL_PATH = "contracts/tactical_memory_prune_schema_v0.json"
+PROMOTION_CONTRACT_SCHEMA_REL_PATH = "contracts/promotion_contract_schema_v0.json"
 TACTICAL_MEMORY_RECORDS_REL_PATH = "state/tactical_memory/records_v0.jsonl"
 TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH = "state/tactical_memory/sanitization_incidents_v0.jsonl"
 MEMORY_EXIT_SUCCESS = 0
@@ -376,6 +377,25 @@ def stable_hash_payload(payload: dict[str, Any]) -> str:
 
 def parse_unique_sorted_csv(raw: str | None) -> list[str]:
     return sorted(set(parse_csv_list(raw)))
+
+
+def parse_impacted_artifacts(raw: str | None) -> list[dict[str, str]]:
+    """
+    Parse comma-separated `artifact_path::change_summary` entries.
+    """
+    entries = parse_csv_list(raw)
+    out: list[dict[str, str]] = []
+    for entry in entries:
+        if "::" not in entry:
+            raise ValueError(f"invalid impacted artifact entry (expected path::summary): {entry}")
+        path_raw, summary_raw = entry.split("::", 1)
+        artifact_path = normalize_repo_rel_path(path_raw.strip())
+        change_summary = summary_raw.strip()
+        if not artifact_path or not change_summary:
+            raise ValueError(f"invalid impacted artifact entry (empty path or summary): {entry}")
+        out.append({"artifact_path": artifact_path, "change_summary": change_summary})
+    out.sort(key=lambda item: (item["artifact_path"], item["change_summary"]))
+    return out
 
 
 def tactical_memory_paths(cortex_dir: Path) -> tuple[Path, Path]:
@@ -3362,6 +3382,277 @@ def memory_prune_project(args: argparse.Namespace) -> int:
         return MEMORY_EXIT_INTERNAL
 
 
+def memory_promote_project(args: argparse.Namespace) -> int:
+    command = "memory-promote"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    assets_dir = resolve_assets_dir(getattr(args, "assets_dir", None))
+    records_path, _ = tactical_memory_paths(cortex_dir)
+
+    record_ids = parse_unique_sorted_csv(args.record_ids)
+    decision_refs = parse_unique_sorted_csv(args.decision_refs)
+    reflection_refs = parse_unique_sorted_csv(args.reflection_refs)
+    evidence_refs = parse_unique_sorted_csv(args.evidence_refs)
+    reviewed_by = parse_unique_sorted_csv(args.reviewed_by)
+    bridge_mode = args.bridge_mode
+
+    result_template: dict[str, Any] = {
+        "bridge_mode": bridge_mode,
+        "non_governance_output": bridge_mode == "non_governance",
+        "canonical_effect": "none" if bridge_mode == "non_governance" else "pending_validation",
+        "promotion_id": None,
+        "tactical_record_refs": record_ids,
+        "required_fields_complete": False,
+        "failure_mode": "none",
+        "promotion_contract_path": None,
+    }
+
+    if not record_ids:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={"code": "invalid_arguments", "message": "--record-ids must include at least one id"},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+
+    try:
+        requested_by = args.requested_by.strip()
+        if not requested_by:
+            raise ValueError("--requested-by must be non-empty")
+        requested_at = parse_optional_rfc3339_utc(args.requested_at, "requested_at") or utc_now()
+        approved_at = parse_optional_rfc3339_utc(args.approved_at, "approved_at") or utc_now()
+        impacted_artifacts = parse_impacted_artifacts(args.impacted_artifacts)
+        rationale_summary = args.rationale_summary.strip()
+
+        with project_lock(
+            project_dir=project_dir,
+            cortex_root=getattr(args, "cortex_root", None),
+            lock_timeout_seconds=args.lock_timeout_seconds,
+            lock_stale_seconds=args.lock_stale_seconds,
+            force_unlock=args.force_unlock,
+            command_name=command,
+        ):
+            record_map = load_tactical_record_map(records_path)
+            missing_ids = [record_id for record_id in record_ids if record_id not in record_map]
+            if missing_ids:
+                raise ValueError(f"record ids not found: {','.join(missing_ids)}")
+
+            selected_records = [record_map[record_id] for record_id in record_ids]
+            source_refs: list[str] = []
+            source_kind_values: list[str] = []
+            for record in selected_records:
+                lineage = record_lineage(record)
+                source_refs.extend(lineage.get("source_refs", []))
+                source_kind_values.append(str(record.get("source", {}).get("source_kind", "")).strip())
+            source_refs = sorted({ref for ref in source_refs if ref.strip()})
+            if not source_refs:
+                source_refs = [f"record:{record_ids[0]}"]
+
+            unique_kinds = {kind for kind in source_kind_values if kind}
+            if unique_kinds == {"adapter_signal"}:
+                source_kind = "adapter_signal"
+            elif "adapter_signal" in unique_kinds and len(unique_kinds) > 1:
+                source_kind = "mixed"
+            else:
+                source_kind = "tactical_record"
+
+            promotion_id = f"prm_{stable_hash_payload({'record_ids': record_ids, 'decision_refs': decision_refs, 'reflection_refs': reflection_refs})[:16]}"
+            result_template["promotion_id"] = promotion_id
+
+            if bridge_mode == "non_governance":
+                result_template["required_fields_complete"] = False
+                result_template["failure_mode"] = "none"
+                result_template["canonical_effect"] = "none"
+                result_template["non_governance_note"] = (
+                    "Non-governance output only. No canonical governance closure is implied."
+                )
+                payload = build_command_response(
+                    command=command,
+                    status="pass",
+                    project_dir=project_dir,
+                    result=result_template,
+                )
+                emit_command_payload(payload, args.format)
+                return MEMORY_EXIT_SUCCESS
+
+            if not decision_refs or not reflection_refs:
+                result_template["failure_mode"] = "missing_decision_reflection_linkage"
+                payload = build_command_response(
+                    command=command,
+                    status="fail",
+                    project_dir=project_dir,
+                    result=result_template,
+                    error={
+                        "code": "missing_decision_reflection_linkage",
+                        "message": "governance-impacting promotion requires decision_refs and reflection_refs",
+                    },
+                )
+                emit_command_payload(payload, args.format)
+                return MEMORY_EXIT_POLICY
+
+            if not impacted_artifacts:
+                result_template["failure_mode"] = "missing_impacted_artifacts"
+                payload = build_command_response(
+                    command=command,
+                    status="fail",
+                    project_dir=project_dir,
+                    result=result_template,
+                    error={
+                        "code": "missing_impacted_artifacts",
+                        "message": "governance-impacting promotion requires impacted artifacts",
+                    },
+                )
+                emit_command_payload(payload, args.format)
+                return MEMORY_EXIT_POLICY
+
+            if not rationale_summary or not evidence_refs:
+                result_template["failure_mode"] = "missing_rationale_evidence_summary"
+                payload = build_command_response(
+                    command=command,
+                    status="fail",
+                    project_dir=project_dir,
+                    result=result_template,
+                    error={
+                        "code": "missing_rationale_evidence_summary",
+                        "message": "governance-impacting promotion requires rationale summary and evidence refs",
+                    },
+                )
+                emit_command_payload(payload, args.format)
+                return MEMORY_EXIT_POLICY
+
+            if not reviewed_by:
+                result_template["failure_mode"] = "missing_promotion_trace_metadata"
+                payload = build_command_response(
+                    command=command,
+                    status="fail",
+                    project_dir=project_dir,
+                    result=result_template,
+                    error={
+                        "code": "missing_promotion_trace_metadata",
+                        "message": "governance-impacting promotion requires reviewed_by metadata",
+                    },
+                )
+                emit_command_payload(payload, args.format)
+                return MEMORY_EXIT_POLICY
+
+            result_template["required_fields_complete"] = True
+            result_template["failure_mode"] = "none"
+            result_template["canonical_effect"] = "candidate_generated"
+
+            promotion_contract = {
+                "version": "v0",
+                "promotion_id": promotion_id,
+                "decision_reflection_linkage": {
+                    "decision_refs": decision_refs,
+                    "reflection_refs": reflection_refs,
+                },
+                "impacted_artifacts": impacted_artifacts,
+                "rationale_evidence_summary": {
+                    "rationale_summary": rationale_summary,
+                    "evidence_refs": evidence_refs,
+                },
+                "promotion_trace_metadata": {
+                    "requested_by": requested_by,
+                    "requested_at": requested_at,
+                    "reviewed_by": reviewed_by,
+                    "approved_at": approved_at,
+                    "approval_state": args.approval_state,
+                    "source_trace": {
+                        "source_kind": source_kind,
+                        "source_refs": source_refs,
+                    },
+                    "bridge_command": command,
+                    "bridge_mode": bridge_mode,
+                    "tactical_record_refs": record_ids,
+                    "bridge_validation": {
+                        "required_fields_complete": True,
+                        "failure_mode": "none",
+                    },
+                },
+            }
+
+            schema_path = resolve_asset_path(assets_dir, PROMOTION_CONTRACT_SCHEMA_REL_PATH)
+            if not schema_path.exists():
+                raise FileNotFoundError(f"missing schema asset: {schema_path}")
+            schema_obj = json.loads(schema_path.read_text(encoding="utf-8"))
+            jsonschema.validate(instance=promotion_contract, schema=schema_obj)
+
+            if args.out_file:
+                out_path = Path(args.out_file)
+                if not out_path.is_absolute():
+                    out_path = project_dir / out_path
+            else:
+                reports_dir = cortex_dir / "reports"
+                reports_dir.mkdir(parents=True, exist_ok=True)
+                out_path = reports_dir / f"promotion_candidate_{promotion_id}_v0.json"
+            atomic_write_text(out_path, json.dumps(promotion_contract, indent=2, sort_keys=True) + "\n")
+
+            try:
+                result_template["promotion_contract_path"] = normalize_repo_rel_path(str(out_path.relative_to(project_dir)))
+            except ValueError:
+                result_template["promotion_contract_path"] = str(out_path)
+
+            payload = build_command_response(
+                command=command,
+                status="pass",
+                project_dir=project_dir,
+                result=result_template,
+            )
+            emit_command_payload(payload, args.format)
+            return MEMORY_EXIT_SUCCESS
+    except RuntimeError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={"code": "lock_conflict", "message": str(exc)},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_LOCK
+    except ValueError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={"code": "invalid_arguments", "message": str(exc)},
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except jsonschema.ValidationError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "invalid_payload",
+                "message": "promotion contract failed schema validation",
+                "details": {"validation_error": exc.message},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except Exception as exc:  # noqa: BLE001
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "internal_error",
+                "message": "unexpected runtime failure during memory-promote",
+                "details": {"exception": str(exc)},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INTERNAL
+
+
 def policy_enable_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     policy_name = args.policy.lower().strip()
@@ -4553,6 +4844,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_lock_args(p_memory_prune)
     p_memory_prune.set_defaults(func=memory_prune_project)
+
+    p_memory_promote = sub.add_parser(
+        "memory-promote",
+        help="Bridge tactical records into promotion-contract candidates.",
+    )
+    p_memory_promote.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_memory_promote)
+    add_assets_arg(p_memory_promote)
+    p_memory_promote.add_argument("--format", choices=["text", "json"], default="text")
+    p_memory_promote.add_argument(
+        "--record-ids",
+        required=True,
+        help="Comma-separated tactical record ids to promote.",
+    )
+    p_memory_promote.add_argument(
+        "--bridge-mode",
+        choices=["governance_impacting", "non_governance"],
+        default="governance_impacting",
+    )
+    p_memory_promote.add_argument("--decision-refs", default="", help="Comma-separated decision linkage refs.")
+    p_memory_promote.add_argument("--reflection-refs", default="", help="Comma-separated reflection linkage refs.")
+    p_memory_promote.add_argument(
+        "--impacted-artifacts",
+        default="",
+        help="Comma-separated artifact_path::change_summary entries.",
+    )
+    p_memory_promote.add_argument("--rationale-summary", default="")
+    p_memory_promote.add_argument("--evidence-refs", default="", help="Comma-separated evidence refs.")
+    p_memory_promote.add_argument("--requested-by", default="cortex-coach")
+    p_memory_promote.add_argument("--requested-at", default="", help="Optional RFC3339 override.")
+    p_memory_promote.add_argument("--reviewed-by", default="", help="Comma-separated reviewer ids.")
+    p_memory_promote.add_argument(
+        "--approval-state",
+        choices=["proposed", "approved", "rejected"],
+        default="proposed",
+    )
+    p_memory_promote.add_argument("--approved-at", default="", help="Optional RFC3339 override.")
+    p_memory_promote.add_argument("--out-file", help="Optional promotion contract output path.")
+    add_lock_args(p_memory_promote)
+    p_memory_promote.set_defaults(func=memory_promote_project)
 
     p_coach = sub.add_parser("coach", help="Run one AI-guided lifecycle coaching cycle.")
     p_coach.add_argument("--project-dir", required=True)
