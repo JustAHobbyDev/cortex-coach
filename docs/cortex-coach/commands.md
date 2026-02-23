@@ -8,7 +8,8 @@ Common option:
 
 ## Tactical Memory Commands (Phase 1)
 
-`memory-record` is implemented. The rest of the tactical memory family is still pending.
+`memory-record` and `memory-search` are implemented. The remaining tactical memory
+commands are still pending.
 
 ### `memory-record`
 
@@ -44,6 +45,34 @@ Exit codes:
 - `3` policy violation (blocked sanitization)
 - `4` lock conflict/timeout
 - `5` internal runtime failure
+
+### `memory-search`
+
+Search tactical records with deterministic ranking tie-break order:
+1. `score_desc`
+2. `captured_at_desc`
+3. `record_id_asc`
+
+```bash
+cortex-coach memory-search \
+  --project-dir /path/to/project \
+  --query "phase1 lock timeout" \
+  --content-classes-any implementation_note,risk_note \
+  --tags-any phase1,lock \
+  --limit 10 \
+  --format json
+```
+
+Key options:
+- `--tags-any <csv>`
+- `--tags-all <csv>`
+- `--captured-at-from <RFC3339>`
+- `--captured-at-to <RFC3339>`
+- `--limit <int>`
+
+No-match semantics:
+- query misses all records: `no_match.reason=no_match`
+- query matches but filters remove all: `no_match.reason=filtered_out`
 
 ## `init`
 

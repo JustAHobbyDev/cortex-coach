@@ -85,6 +85,7 @@ DECISION_ARTIFACTS_DIR = ".cortex/artifacts/decisions"
 DEFAULT_CONTRACT_FILE = "contracts/coach_asset_contract_v0.json"
 MEMORY_COMMAND_VERSION = "v0"
 MEMORY_RECORD_SCHEMA_REL_PATH = "contracts/tactical_memory_record_schema_v0.json"
+MEMORY_SEARCH_SCHEMA_REL_PATH = "contracts/tactical_memory_search_result_schema_v0.json"
 TACTICAL_MEMORY_RECORDS_REL_PATH = "state/tactical_memory/records_v0.jsonl"
 TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH = "state/tactical_memory/sanitization_incidents_v0.jsonl"
 MEMORY_EXIT_SUCCESS = 0
@@ -112,6 +113,11 @@ MEMORY_CONTENT_CLASS_CHOICES = [
     "task_state",
     "reference_excerpt",
     "incident_note",
+]
+MEMORY_SEARCH_TIE_BREAK_ORDER = [
+    "score_desc",
+    "captured_at_desc",
+    "record_id_asc",
 ]
 MEMORY_POLICY_BLOCK_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     (
@@ -405,6 +411,114 @@ def detect_git_head(project_dir: Path) -> str | None:
     if re.fullmatch(r"[0-9a-f]{7,40}", out):
         return out
     return None
+
+
+def load_tactical_records(records_path: Path) -> list[dict[str, Any]]:
+    if not records_path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for idx, raw in enumerate(records_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"invalid tactical record json on line {idx}: {exc}") from exc
+        if not isinstance(obj, dict):
+            raise ValueError(f"invalid tactical record object on line {idx}: expected JSON object")
+        out.append(obj)
+    return out
+
+
+def normalize_query_text(query_text: str) -> str:
+    return " ".join(query_text.strip().lower().split())
+
+
+def query_tokens(normalized_query: str) -> list[str]:
+    return [tok for tok in re.split(r"[^a-z0-9_.:-]+", normalized_query) if tok]
+
+
+def parse_record_captured_at_epoch(record: dict[str, Any]) -> float:
+    captured_at = str(record.get("captured_at", "")).strip()
+    try:
+        return parse_rfc3339_utc(captured_at, "captured_at").timestamp()
+    except ValueError:
+        return 0.0
+
+
+def compute_rule_based_score(record: dict[str, Any], tokens: list[str], normalized_query: str) -> float:
+    content_obj = record.get("content", {})
+    source_obj = record.get("source", {})
+    text = str(content_obj.get("text", "")).lower()
+    source_ref = str(source_obj.get("source_ref", "")).lower()
+    tags_raw = content_obj.get("tags", [])
+    tags = [str(t).lower() for t in tags_raw] if isinstance(tags_raw, list) else []
+
+    if not tokens:
+        return 0.0
+
+    score = 0.0
+    for tok in tokens:
+        if tok in text:
+            score += float(text.count(tok))
+        if tok in source_ref:
+            score += 1.0
+        if tok in tags:
+            score += 1.5
+
+    if normalized_query and normalized_query in text:
+        score += 1.0
+    return score
+
+
+def record_matches_search_filters(
+    record: dict[str, Any],
+    content_classes_any: list[str],
+    tags_any: list[str],
+    tags_all: list[str],
+    captured_at_from: str | None,
+    captured_at_to: str | None,
+) -> bool:
+    content_obj = record.get("content", {})
+    content_class = str(content_obj.get("content_class", ""))
+    tags_raw = content_obj.get("tags", [])
+    tags = [str(t) for t in tags_raw] if isinstance(tags_raw, list) else []
+
+    if content_classes_any and content_class not in content_classes_any:
+        return False
+    if tags_any and not any(t in tags for t in tags_any):
+        return False
+    if tags_all and not all(t in tags for t in tags_all):
+        return False
+
+    if captured_at_from or captured_at_to:
+        captured_at = str(record.get("captured_at", "")).strip()
+        try:
+            captured_dt = parse_rfc3339_utc(captured_at, "captured_at")
+        except ValueError:
+            return False
+        if captured_at_from and captured_dt < parse_rfc3339_utc(captured_at_from, "captured_at_from"):
+            return False
+        if captured_at_to and captured_dt > parse_rfc3339_utc(captured_at_to, "captured_at_to"):
+            return False
+
+    return True
+
+
+def confidence_from_score(score: float) -> float:
+    if score <= 0:
+        return 0.0
+    return round(min(1.0, score / (score + 3.0)), 6)
+
+
+def snippet_from_text(text: str, max_chars: int = 180) -> str:
+    normalized = " ".join(text.strip().split())
+    if not normalized:
+        return "(empty)"
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
 
 
 def sanitize_tactical_text(text: str) -> tuple[str, str, list[dict[str, str]], list[dict[str, str]]]:
@@ -2326,6 +2440,222 @@ def memory_record_project(args: argparse.Namespace) -> int:
         return MEMORY_EXIT_INTERNAL
 
 
+def memory_search_project(args: argparse.Namespace) -> int:
+    command = "memory-search"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    assets_dir = resolve_assets_dir(getattr(args, "assets_dir", None))
+    records_path, _ = tactical_memory_paths(cortex_dir)
+
+    query_text = args.query.strip()
+    normalized_query = normalize_query_text(query_text)
+    tokens = query_tokens(normalized_query)
+    content_classes_any = parse_unique_sorted_csv(args.content_classes_any)
+    tags_any = parse_unique_sorted_csv(args.tags_any)
+    tags_all = parse_unique_sorted_csv(args.tags_all)
+
+    result_template: dict[str, Any] = {
+        "query": {
+            "query_text": query_text if query_text else "(empty)",
+            "normalized_query": normalized_query if normalized_query else "(empty)",
+            "requested_limit": int(args.limit),
+        },
+        "filters": {
+            "content_classes_any": content_classes_any,
+            "tags_any": tags_any,
+            "tags_all": tags_all,
+        },
+        "ranking": {
+            "method": "rule_based_v0",
+            "tie_break_order": MEMORY_SEARCH_TIE_BREAK_ORDER,
+        },
+        "result_count": 0,
+        "results": [],
+        "no_match": {
+            "matched": False,
+            "reason": "no_match",
+            "suggestion": "Try broader query terms or fewer filters.",
+        },
+    }
+
+    try:
+        if not query_text:
+            raise ValueError("--query must be non-empty")
+        if not tokens:
+            raise ValueError("--query must contain at least one searchable token")
+        invalid_classes = [c for c in content_classes_any if c not in MEMORY_CONTENT_CLASS_CHOICES]
+        if invalid_classes:
+            raise ValueError(f"invalid content class filters: {','.join(invalid_classes)}")
+        if args.limit < 1:
+            raise ValueError("--limit must be >= 1")
+
+        captured_at_from = parse_optional_rfc3339_utc(args.captured_at_from, "captured_at_from")
+        captured_at_to = parse_optional_rfc3339_utc(args.captured_at_to, "captured_at_to")
+        if captured_at_from:
+            result_template["filters"]["captured_at_from"] = captured_at_from
+        if captured_at_to:
+            result_template["filters"]["captured_at_to"] = captured_at_to
+        if captured_at_from and captured_at_to:
+            from_dt = parse_rfc3339_utc(captured_at_from, "captured_at_from")
+            to_dt = parse_rfc3339_utc(captured_at_to, "captured_at_to")
+            if from_dt > to_dt:
+                raise ValueError("--captured-at-from must be <= --captured-at-to")
+
+        records = load_tactical_records(records_path)
+
+        query_matches: list[dict[str, Any]] = []
+        for record in records:
+            score = compute_rule_based_score(record, tokens, normalized_query)
+            if score <= 0:
+                continue
+            query_matches.append(
+                {
+                    "record": record,
+                    "score": float(round(score, 6)),
+                    "captured_epoch": parse_record_captured_at_epoch(record),
+                }
+            )
+
+        filtered_matches: list[dict[str, Any]] = []
+        for entry in query_matches:
+            record = entry["record"]
+            if record_matches_search_filters(
+                record=record,
+                content_classes_any=content_classes_any,
+                tags_any=tags_any,
+                tags_all=tags_all,
+                captured_at_from=captured_at_from,
+                captured_at_to=captured_at_to,
+            ):
+                filtered_matches.append(entry)
+
+        filtered_matches.sort(
+            key=lambda item: (
+                -float(item["score"]),
+                -float(item["captured_epoch"]),
+                str(item["record"].get("record_id", "")),
+            )
+        )
+
+        limited = filtered_matches[: int(args.limit)]
+        results: list[dict[str, Any]] = []
+        for idx, item in enumerate(limited, start=1):
+            record = item["record"]
+            source_obj = record.get("source", {})
+            provenance_obj = record.get("provenance", {})
+            source_refs_raw = provenance_obj.get("source_refs", [])
+            source_refs = [str(x) for x in source_refs_raw] if isinstance(source_refs_raw, list) else []
+            source_ref = str(source_obj.get("source_ref", ""))
+            if not source_refs and source_ref:
+                source_refs = [source_ref]
+
+            content_obj = record.get("content", {})
+            tags_raw = content_obj.get("tags", [])
+            tags = sorted({str(x) for x in tags_raw}) if isinstance(tags_raw, list) else []
+            score = float(item["score"])
+            captured_at = str(record.get("captured_at", ""))
+            record_id = str(record.get("record_id", ""))
+
+            results.append(
+                {
+                    "rank": idx,
+                    "record_id": record_id,
+                    "score": score,
+                    "confidence": confidence_from_score(score),
+                    "snippet": snippet_from_text(str(content_obj.get("text", ""))),
+                    "content_class": str(content_obj.get("content_class", "")),
+                    "tags": tags,
+                    "captured_at": captured_at,
+                    "provenance": {
+                        "source_kind": str(source_obj.get("source_kind", "")),
+                        "source_ref": source_ref,
+                        "source_refs": source_refs,
+                    },
+                    "sort_key": {
+                        "score": score,
+                        "captured_at": captured_at,
+                        "record_id": record_id,
+                    },
+                }
+            )
+
+        if results:
+            no_match = {"matched": True, "reason": "matches_found"}
+        elif query_matches:
+            no_match = {
+                "matched": False,
+                "reason": "filtered_out",
+                "suggestion": "Relax filters or captured-at bounds.",
+            }
+        else:
+            no_match = {
+                "matched": False,
+                "reason": "no_match",
+                "suggestion": "Try broader query terms or different tags.",
+            }
+
+        result_template["result_count"] = len(results)
+        result_template["results"] = results
+        result_template["no_match"] = no_match
+
+        payload = build_command_response(
+            command=command,
+            status="pass",
+            project_dir=project_dir,
+            result=result_template,
+        )
+
+        schema_path = resolve_asset_path(assets_dir, MEMORY_SEARCH_SCHEMA_REL_PATH)
+        if not schema_path.exists():
+            raise FileNotFoundError(f"missing schema asset: {schema_path}")
+        schema_obj = json.loads(schema_path.read_text(encoding="utf-8"))
+        jsonschema.validate(instance=payload, schema=schema_obj)
+
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_SUCCESS
+    except ValueError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "invalid_arguments",
+                "message": str(exc),
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except jsonschema.ValidationError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "invalid_payload",
+                "message": "search payload failed schema validation",
+                "details": {"validation_error": exc.message},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INVALID
+    except Exception as exc:  # noqa: BLE001
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result=result_template,
+            error={
+                "code": "internal_error",
+                "message": "unexpected runtime failure during memory-search",
+                "details": {"exception": str(exc)},
+            },
+        )
+        emit_command_payload(payload, args.format)
+        return MEMORY_EXIT_INTERNAL
+
+
 def policy_enable_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     policy_name = args.policy.lower().strip()
@@ -3418,6 +3748,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_memory_record.add_argument("--ttl-expires-at", default="", help="Optional RFC3339 TTL expiry override.")
     add_lock_args(p_memory_record)
     p_memory_record.set_defaults(func=memory_record_project)
+
+    p_memory_search = sub.add_parser(
+        "memory-search",
+        help="Search tactical memory records with deterministic ranking output.",
+    )
+    p_memory_search.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_memory_search)
+    add_assets_arg(p_memory_search)
+    p_memory_search.add_argument("--format", choices=["text", "json"], default="text")
+    p_memory_search.add_argument("--query", required=True, help="Search query text.")
+    p_memory_search.add_argument("--limit", type=int, default=10, help="Maximum results to return (default: 10).")
+    p_memory_search.add_argument(
+        "--content-classes-any",
+        default="",
+        help="Optional comma-separated content_class filters (any-match).",
+    )
+    p_memory_search.add_argument("--tags-any", default="", help="Optional comma-separated tags any-match filter.")
+    p_memory_search.add_argument("--tags-all", default="", help="Optional comma-separated tags all-match filter.")
+    p_memory_search.add_argument("--captured-at-from", default="", help="Optional RFC3339 lower bound.")
+    p_memory_search.add_argument("--captured-at-to", default="", help="Optional RFC3339 upper bound.")
+    p_memory_search.set_defaults(func=memory_search_project)
 
     p_coach = sub.add_parser("coach", help="Run one AI-guided lifecycle coaching cycle.")
     p_coach.add_argument("--project-dir", required=True)
