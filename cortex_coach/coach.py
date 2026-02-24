@@ -2266,7 +2266,15 @@ def context_load_project(args: argparse.Namespace) -> int:
         str(args.max_chars_per_file),
         "--fallback-mode",
         args.fallback_mode,
+        "--adapter-mode",
+        args.adapter_mode,
+        "--adapter-max-items",
+        str(args.adapter_max_items),
+        "--adapter-stale-seconds",
+        str(args.adapter_stale_seconds),
     ]
+    if getattr(args, "adapter_file", None):
+        cmd.extend(["--adapter-file", args.adapter_file])
     if args.out_file:
         cmd.extend(["--out-file", args.out_file])
     if getattr(args, "assets_dir", None):
@@ -4714,6 +4722,29 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["none", "priority"],
         default="priority",
         help="Fallback behavior when restricted loading fails.",
+    )
+    p_context_load.add_argument(
+        "--adapter-mode",
+        choices=["off", "beads_file"],
+        default="off",
+        help="Optional adapter enrichment mode (default: off).",
+    )
+    p_context_load.add_argument(
+        "--adapter-file",
+        default="",
+        help="Adapter payload file path used when --adapter-mode=beads_file.",
+    )
+    p_context_load.add_argument(
+        "--adapter-max-items",
+        type=int,
+        default=4,
+        help="Maximum adapter items considered for selection (default: 4).",
+    )
+    p_context_load.add_argument(
+        "--adapter-stale-seconds",
+        type=int,
+        default=86400,
+        help="Staleness threshold in seconds for adapter freshness warnings (default: 86400).",
     )
     p_context_load.add_argument("--out-file")
     add_assets_arg(p_context_load)

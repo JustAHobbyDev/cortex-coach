@@ -221,3 +221,96 @@ def test_context_load_invalid_weighting_mode_fails_argument_validation(initializ
     )
     assert proc.returncode == 2
     assert "invalid choice" in proc.stderr
+
+
+def test_context_load_adapter_beads_file_enrichment(initialized_project: Path) -> None:
+    adapter_file = initialized_project / ".cortex" / "reports" / "beads_adapter.json"
+    adapter_file.parent.mkdir(parents=True, exist_ok=True)
+    adapter_file.write_text(
+        json.dumps(
+            {
+                "adapter_id": "beads",
+                "adapter_fetched_at": "2026-02-24T05:00:00Z",
+                "items": [
+                    {
+                        "id": "wk_blocked_001",
+                        "state": "blocked",
+                        "title": "Resolve governance gate blocker",
+                        "summary": "Blocked by reflection linkage until promoted.",
+                        "tags": ["governance", "blocked"],
+                        "priority": 1,
+                        "source_updated_at": "2026-02-24T04:55:00Z",
+                    },
+                    {
+                        "id": "wk_ready_001",
+                        "state": "ready",
+                        "title": "Implement adapter degradation test",
+                        "summary": "Ready for implementation after control-plane load.",
+                        "tags": ["phase3", "ready"],
+                        "priority": 2,
+                        "source_updated_at": "2026-02-24T04:45:00Z",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out_file = initialized_project / ".cortex" / "reports" / "bundle_adapter.json"
+    run_coach(
+        initialized_project,
+        "context-load",
+        "--task",
+        "governance blocker",
+        "--adapter-mode",
+        "beads_file",
+        "--adapter-file",
+        ".cortex/reports/beads_adapter.json",
+        "--adapter-max-items",
+        "2",
+        "--max-files",
+        "24",
+        "--max-chars-per-file",
+        "1200",
+        "--out-file",
+        str(out_file),
+    )
+
+    payload = json.loads(out_file.read_text(encoding="utf-8"))
+    assert payload["adapter"]["mode"] == "beads_file"
+    assert payload["adapter"]["status"] == "loaded"
+    assert payload["adapter"]["adapter_id"] == "beads"
+    adapter_entries = [entry for entry in payload["files"] if str(entry.get("selected_by", "")).startswith("adapter:beads:")]
+    assert len(adapter_entries) >= 1
+    for entry in adapter_entries:
+        assert entry["provenance"]["source_kind"] == "adapter_signal"
+        assert isinstance(entry.get("adapter"), dict)
+        assert entry["adapter"]["adapter_id"] == "beads"
+        assert 0.0 <= float(entry["confidence"]) <= 1.0
+
+
+def test_context_load_adapter_failure_degrades_without_blocking(initialized_project: Path) -> None:
+    out_file = initialized_project / ".cortex" / "reports" / "bundle_adapter_degraded.json"
+    run_coach(
+        initialized_project,
+        "context-load",
+        "--task",
+        "governance updates",
+        "--adapter-mode",
+        "beads_file",
+        "--adapter-file",
+        ".cortex/reports/missing_adapter.json",
+        "--max-files",
+        "16",
+        "--max-chars-per-file",
+        "1000",
+        "--out-file",
+        str(out_file),
+    )
+
+    payload = json.loads(out_file.read_text(encoding="utf-8"))
+    assert payload["adapter"]["mode"] == "beads_file"
+    assert payload["adapter"]["status"] == "degraded"
+    assert any("adapter_degraded:file_not_found" in warning for warning in payload["warnings"])
+    assert any(str(entry.get("selected_by", "")).startswith("control_plane") for entry in payload["files"])
+    assert any(str(entry.get("selected_by", "")).startswith("task:") for entry in payload["files"])

@@ -364,6 +364,7 @@ cortex-coach context-load \
   --task "design drift" \
   --retrieval-profile medium \
   --weighting-mode uniform \
+  --adapter-mode off \
   --max-files 10 \
   --max-chars-per-file 2000 \
   --fallback-mode priority \
@@ -384,6 +385,22 @@ cortex-coach context-load \
 2. relaxed budget
 3. unrestricted (no file/char limits) if prior levels fail
 
+Optional adapter enrichment (`Phase 3`, read-only, fail-open):
+
+```bash
+cortex-coach context-load \
+  --project-dir /path/to/project \
+  --task "governance blocker" \
+  --adapter-mode beads_file \
+  --adapter-file .cortex/reports/beads_adapter.json \
+  --adapter-max-items 4 \
+  --adapter-stale-seconds 86400
+```
+
+Adapter modes:
+- `off` (default)
+- `beads_file` (loads bounded work-graph payload from JSON file)
+
 Deterministic ranking contract:
 1. `combined_score_desc`
 2. `evidence_score_desc`
@@ -394,6 +411,8 @@ Context entry metadata contract:
 - each selected file emits `provenance.source_kind`, `provenance.source_ref`, `provenance.source_refs`
 - each selected file emits bounded confidence (`0.0` to `1.0`) and score breakdown metadata
 - ordering remains deterministic across repeated runs for identical inputs/repo state
+- adapter-selected entries emit `provenance.source_kind=adapter_signal` plus normalized adapter payload metadata
+- adapter failures/timeouts/decode errors degrade to control-plane + task-only output and add explicit warning metadata
 
 Supported retrieval profiles:
 - `small`
