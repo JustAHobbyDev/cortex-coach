@@ -134,6 +134,21 @@ MEMORY_POLICY_VIOLATION_CLASSES = [
     "regulated_restricted",
     "other_policy_violation",
 ]
+MEMORY_COMPACTION_POLICY_CHOICES = [
+    "disabled",
+    "stale_only",
+    "stale_and_duplicate",
+]
+MEMORY_COMPACTION_PROTECTED_CONTENT_CLASSES_DEFAULT = [
+    "decision_signal",
+    "governance_context",
+    "incident_note",
+]
+MEMORY_COMPACTION_PROTECTED_TAGS_DEFAULT = [
+    "governance_linked",
+    "no_compact",
+    "promotion_candidate",
+]
 MEMORY_POLICY_BLOCK_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
     (
         "private_key_material",
@@ -539,6 +554,47 @@ def parse_record_captured_at_epoch(record: dict[str, Any]) -> float:
         return parse_rfc3339_utc(captured_at, "captured_at").timestamp()
     except ValueError:
         return 0.0
+
+
+def normalized_compaction_text(text: str) -> str:
+    return " ".join(str(text).strip().lower().split())
+
+
+def record_duplicate_compaction_key(record: dict[str, Any]) -> str:
+    content_obj = record.get("content", {})
+    source_obj = record.get("source", {})
+    text = normalized_compaction_text(str(content_obj.get("text", "")))
+    content_class = str(content_obj.get("content_class", "")).strip().lower()
+    source_kind = str(source_obj.get("source_kind", "")).strip().lower()
+    source_ref = str(source_obj.get("source_ref", "")).strip().lower()
+    return "|".join([source_kind, source_ref, content_class, text])
+
+
+def duplicate_compaction_prune_ids(records: list[dict[str, Any]]) -> set[str]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        record_id = str(record.get("record_id", "")).strip()
+        if not record_id:
+            continue
+        key = record_duplicate_compaction_key(record)
+        grouped.setdefault(key, []).append(record)
+
+    prune_ids: set[str] = set()
+    for group in grouped.values():
+        if len(group) < 2:
+            continue
+        ranked = sorted(
+            group,
+            key=lambda item: (
+                -parse_record_captured_at_epoch(item),
+                str(item.get("record_id", "")),
+            ),
+        )
+        for item in ranked[1:]:
+            record_id = str(item.get("record_id", "")).strip()
+            if record_id:
+                prune_ids.add(record_id)
+    return prune_ids
 
 
 def compute_rule_based_score(record: dict[str, Any], tokens: list[str], normalized_query: str) -> float:
@@ -3219,6 +3275,8 @@ def memory_prune_project(args: argparse.Namespace) -> int:
 
     retention_classes_any = parse_unique_sorted_csv(args.retention_classes_any)
     policy_violation_classes_any = parse_unique_sorted_csv(args.policy_violation_classes_any)
+    protected_content_classes_any = parse_unique_sorted_csv(args.protected_content_classes_any)
+    protected_tags_any = parse_unique_sorted_csv(args.protected_tags_any)
 
     result_template: dict[str, Any] = {
         "dry_run": bool(args.dry_run),
@@ -3226,24 +3284,59 @@ def memory_prune_project(args: argparse.Namespace) -> int:
             "expired_before": args.expired_before,
             "retention_classes_any": retention_classes_any,
             "policy_violation_classes_any": policy_violation_classes_any,
+            "compaction_policy": args.compaction_policy,
+            "stale_before": args.stale_before,
+            "protected_content_classes_any": protected_content_classes_any,
+            "protected_tags_any": protected_tags_any,
+        },
+        "compaction": {
+            "policy": args.compaction_policy,
+            "stale_before": args.stale_before,
+            "duplicate_strategy": (
+                "keep_latest_captured_at_then_record_id_asc"
+                if args.compaction_policy == "stale_and_duplicate"
+                else "none"
+            ),
+            "protected_content_classes_any": protected_content_classes_any,
+            "protected_tags_any": protected_tags_any,
         },
         "ordering_policy": MEMORY_PRUNE_ORDERING_POLICY,
         "summary": {
             "candidate_count": 0,
             "pruned_count": 0,
             "skipped_count": 0,
+            "compaction_candidate_count": 0,
+            "stale_candidate_count": 0,
+            "duplicate_candidate_count": 0,
+            "protected_skip_count": 0,
         },
         "actions": [],
     }
 
     try:
         expired_before_dt = parse_rfc3339_utc(args.expired_before, "expired_before")
+        stale_before_dt = (
+            parse_rfc3339_utc(args.stale_before, "stale_before")
+            if str(args.stale_before).strip()
+            else None
+        )
         invalid_retention = [x for x in retention_classes_any if x not in MEMORY_RETENTION_TTL_DAYS]
         if invalid_retention:
             raise ValueError(f"invalid retention classes: {','.join(invalid_retention)}")
         invalid_policy = [x for x in policy_violation_classes_any if x not in MEMORY_POLICY_VIOLATION_CLASSES]
         if invalid_policy:
             raise ValueError(f"invalid policy violation classes: {','.join(invalid_policy)}")
+        invalid_protected_content_classes = [
+            x for x in protected_content_classes_any if x not in MEMORY_CONTENT_CLASS_CHOICES
+        ]
+        if invalid_protected_content_classes:
+            raise ValueError(f"invalid protected content classes: {','.join(invalid_protected_content_classes)}")
+        if args.compaction_policy not in MEMORY_COMPACTION_POLICY_CHOICES:
+            raise ValueError(f"invalid compaction policy: {args.compaction_policy}")
+        if args.compaction_policy == "disabled" and stale_before_dt is not None:
+            raise ValueError("--stale-before requires --compaction-policy stale_only or stale_and_duplicate")
+        if args.compaction_policy == "stale_only" and stale_before_dt is None:
+            raise ValueError("--stale-before is required when --compaction-policy stale_only")
 
         with project_lock(
             project_dir=project_dir,
@@ -3255,6 +3348,9 @@ def memory_prune_project(args: argparse.Namespace) -> int:
         ):
             records = load_tactical_records(records_path)
             records.sort(key=lambda r: str(r.get("record_id", "")))
+            duplicate_prune_ids = (
+                duplicate_compaction_prune_ids(records) if args.compaction_policy == "stale_and_duplicate" else set()
+            )
 
             actions: list[dict[str, Any]] = []
             for record in records:
@@ -3277,21 +3373,60 @@ def memory_prune_project(args: argparse.Namespace) -> int:
                 violations = record_policy_violation_classes(record)
                 matched_policy_violations = sorted(violations.intersection(policy_violation_classes_any))
 
-                if not expired and not matched_policy_violations:
+                captured_epoch = parse_record_captured_at_epoch(record)
+                stale_candidate = bool(
+                    args.compaction_policy != "disabled"
+                    and stale_before_dt is not None
+                    and captured_epoch < stale_before_dt.timestamp()
+                )
+                duplicate_candidate = bool(
+                    args.compaction_policy == "stale_and_duplicate" and record_id in duplicate_prune_ids
+                )
+
+                matched_criteria: list[str] = []
+                if expired:
+                    matched_criteria.append("expired_ttl")
+                if matched_policy_violations:
+                    matched_criteria.append("policy_violation")
+                if stale_candidate:
+                    matched_criteria.append("stale_compaction")
+                if duplicate_candidate:
+                    matched_criteria.append("duplicate_compaction")
+
+                if not matched_criteria:
                     continue
 
-                prune_reason = "expired_ttl" if expired else "policy_violation"
+                if "expired_ttl" in matched_criteria:
+                    prune_reason = "expired_ttl"
+                elif "policy_violation" in matched_criteria:
+                    prune_reason = "policy_violation"
+                elif "duplicate_compaction" in matched_criteria:
+                    prune_reason = "duplicate_compaction"
+                else:
+                    prune_reason = "stale_compaction"
+
                 content_obj = record.get("content", {})
+                content_class = str(content_obj.get("content_class", "")).strip()
                 tags_raw = content_obj.get("tags", [])
                 tags = {str(x) for x in tags_raw} if isinstance(tags_raw, list) else set()
-                linked_dependency = "governance_linked" in tags and not expired
+                has_compaction_criteria = (
+                    "stale_compaction" in matched_criteria or "duplicate_compaction" in matched_criteria
+                )
+                protection_blocks: list[str] = []
+                if has_compaction_criteria and content_class in protected_content_classes_any:
+                    protection_blocks.append("protected_content_class")
+                if has_compaction_criteria and tags.intersection(set(protected_tags_any)):
+                    protection_blocks.append("protected_tag")
+                linked_dependency = "governance_linked" in tags and "expired_ttl" not in matched_criteria
+                if linked_dependency:
+                    protection_blocks.append("linked_governance_dependency")
 
                 if args.dry_run:
                     decision = "skip"
                     reason = "dry_run_only"
-                elif linked_dependency:
+                elif protection_blocks:
                     decision = "skip"
-                    reason = "linked_governance_dependency"
+                    reason = protection_blocks[0]
                 else:
                     decision = "prune"
                     reason = prune_reason
@@ -3301,6 +3436,9 @@ def memory_prune_project(args: argparse.Namespace) -> int:
                         "record_id": record_id,
                         "decision": decision,
                         "reason": reason,
+                        "matched_criteria": sorted(matched_criteria),
+                        "matched_policy_violation_classes": matched_policy_violations,
+                        "protection_blocks": sorted(set(protection_blocks)),
                         "lineage": record_lineage(record),
                     }
                 )
@@ -3317,6 +3455,22 @@ def memory_prune_project(args: argparse.Namespace) -> int:
                 "candidate_count": len(actions),
                 "pruned_count": 0 if args.dry_run else sum(1 for a in actions if a.get("decision") == "prune"),
                 "skipped_count": len(actions) if args.dry_run else sum(1 for a in actions if a.get("decision") == "skip"),
+                "compaction_candidate_count": sum(
+                    1
+                    for a in actions
+                    if "stale_compaction" in a.get("matched_criteria", [])
+                    or "duplicate_compaction" in a.get("matched_criteria", [])
+                ),
+                "stale_candidate_count": sum(1 for a in actions if "stale_compaction" in a.get("matched_criteria", [])),
+                "duplicate_candidate_count": sum(
+                    1 for a in actions if "duplicate_compaction" in a.get("matched_criteria", [])
+                ),
+                "protected_skip_count": sum(
+                    1
+                    for a in actions
+                    if str(a.get("reason", ""))
+                    in {"protected_content_class", "protected_tag", "linked_governance_dependency"}
+                ),
             }
             result_template["summary"] = summary
             result_template["actions"] = actions
@@ -4851,6 +5005,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy-violation-classes-any",
         default="",
         help="Optional comma-separated policy violation class filter.",
+    )
+    p_memory_prune.add_argument(
+        "--compaction-policy",
+        choices=MEMORY_COMPACTION_POLICY_CHOICES,
+        default="disabled",
+        help="Compaction policy mode (default: disabled).",
+    )
+    p_memory_prune.add_argument(
+        "--stale-before",
+        default="",
+        help="Optional RFC3339 timestamp: records captured before this may be stale-compaction candidates.",
+    )
+    p_memory_prune.add_argument(
+        "--protected-content-classes-any",
+        default=",".join(MEMORY_COMPACTION_PROTECTED_CONTENT_CLASSES_DEFAULT),
+        help=(
+            "Comma-separated content classes protected from compaction pruning "
+            "(default: decision_signal,governance_context,incident_note)."
+        ),
+    )
+    p_memory_prune.add_argument(
+        "--protected-tags-any",
+        default=",".join(MEMORY_COMPACTION_PROTECTED_TAGS_DEFAULT),
+        help="Comma-separated tags protected from compaction pruning (default: governance_linked,no_compact,promotion_candidate).",
     )
     p_memory_prune.add_argument(
         "--dry-run",

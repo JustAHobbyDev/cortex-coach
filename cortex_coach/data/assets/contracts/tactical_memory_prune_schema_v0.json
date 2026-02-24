@@ -43,6 +43,7 @@
       "required": [
         "dry_run",
         "criteria",
+        "compaction",
         "ordering_policy",
         "summary",
         "actions"
@@ -56,7 +57,11 @@
           "additionalProperties": false,
           "required": [
             "expired_before",
-            "policy_violation_classes_any"
+            "policy_violation_classes_any",
+            "compaction_policy",
+            "stale_before",
+            "protected_content_classes_any",
+            "protected_tags_any"
           ],
           "properties": {
             "expired_before": {
@@ -88,6 +93,96 @@
                   "other_policy_violation"
                 ]
               }
+            },
+            "compaction_policy": {
+              "type": "string",
+              "enum": [
+                "disabled",
+                "stale_only",
+                "stale_and_duplicate"
+              ]
+            },
+            "stale_before": {
+              "type": "string"
+            },
+            "protected_content_classes_any": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "governance_context",
+                  "implementation_note",
+                  "decision_signal",
+                  "risk_note",
+                  "task_state",
+                  "reference_excerpt",
+                  "incident_note"
+                ]
+              }
+            },
+            "protected_tags_any": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_.:-]{0,63}$"
+              }
+            }
+          }
+        },
+        "compaction": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "policy",
+            "stale_before",
+            "duplicate_strategy",
+            "protected_content_classes_any",
+            "protected_tags_any"
+          ],
+          "properties": {
+            "policy": {
+              "type": "string",
+              "enum": [
+                "disabled",
+                "stale_only",
+                "stale_and_duplicate"
+              ]
+            },
+            "stale_before": {
+              "type": "string"
+            },
+            "duplicate_strategy": {
+              "type": "string",
+              "enum": [
+                "none",
+                "keep_latest_captured_at_then_record_id_asc"
+              ]
+            },
+            "protected_content_classes_any": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "governance_context",
+                  "implementation_note",
+                  "decision_signal",
+                  "risk_note",
+                  "task_state",
+                  "reference_excerpt",
+                  "incident_note"
+                ]
+              }
+            },
+            "protected_tags_any": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_.:-]{0,63}$"
+              }
             }
           }
         },
@@ -103,7 +198,11 @@
           "required": [
             "candidate_count",
             "pruned_count",
-            "skipped_count"
+            "skipped_count",
+            "compaction_candidate_count",
+            "stale_candidate_count",
+            "duplicate_candidate_count",
+            "protected_skip_count"
           ],
           "properties": {
             "candidate_count": {
@@ -115,6 +214,22 @@
               "minimum": 0
             },
             "skipped_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "compaction_candidate_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "stale_candidate_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "duplicate_candidate_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "protected_skip_count": {
               "type": "integer",
               "minimum": 0
             }
@@ -129,6 +244,9 @@
               "record_id",
               "decision",
               "reason",
+              "matched_criteria",
+              "matched_policy_violation_classes",
+              "protection_blocks",
               "lineage"
             ],
             "properties": {
@@ -148,10 +266,53 @@
                 "enum": [
                   "expired_ttl",
                   "policy_violation",
+                  "stale_compaction",
+                  "duplicate_compaction",
                   "retained_by_policy",
+                  "protected_content_class",
+                  "protected_tag",
                   "linked_governance_dependency",
                   "dry_run_only"
                 ]
+              },
+              "matched_criteria": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "expired_ttl",
+                    "policy_violation",
+                    "stale_compaction",
+                    "duplicate_compaction"
+                  ]
+                }
+              },
+              "matched_policy_violation_classes": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "secret",
+                    "credential",
+                    "pii",
+                    "regulated_restricted",
+                    "other_policy_violation"
+                  ]
+                }
+              },
+              "protection_blocks": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "protected_content_class",
+                    "protected_tag",
+                    "linked_governance_dependency"
+                  ]
+                }
               },
               "lineage": {
                 "type": "object",

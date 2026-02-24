@@ -16,6 +16,7 @@ def _capture_record(
     ttl_expires_at: str,
     text: str,
     tags: str = "phase1",
+    content_class: str = "task_state",
 ) -> str:
     proc = run_coach(
         project_dir,
@@ -31,7 +32,7 @@ def _capture_record(
         "--captured-at",
         captured_at,
         "--content-class",
-        "task_state",
+        content_class,
         "--retention-class",
         "short",
         "--ttl-expires-at",
@@ -198,6 +199,119 @@ def test_memory_prune_linked_dependency_skips_when_not_dry_run(initialized_proje
     assert action["record_id"] == linked_id
     assert action["decision"] == "skip"
     assert action["reason"] == "linked_governance_dependency"
+
+
+def test_memory_prune_stale_compaction_prunes_non_protected_records(initialized_project: Path) -> None:
+    stale_id = _capture_record(
+        initialized_project,
+        source_ref="session://stale",
+        captured_at="2026-01-01T00:00:00Z",
+        ttl_expires_at="2026-12-31T00:00:00Z",
+        text="old implementation note",
+        tags="phase2",
+    )
+
+    proc = run_coach(
+        initialized_project,
+        "memory-prune",
+        "--expired-before",
+        "2026-01-01T00:00:00Z",
+        "--compaction-policy",
+        "stale_only",
+        "--stale-before",
+        "2026-02-01T00:00:00Z",
+        "--no-dry-run",
+        "--format",
+        "json",
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "pass"
+    assert payload["result"]["summary"]["candidate_count"] == 1
+    assert payload["result"]["summary"]["pruned_count"] == 1
+    assert payload["result"]["summary"]["stale_candidate_count"] == 1
+    action = payload["result"]["actions"][0]
+    assert action["record_id"] == stale_id
+    assert action["reason"] == "stale_compaction"
+    assert "stale_compaction" in action["matched_criteria"]
+
+
+def test_memory_prune_stale_compaction_protects_governance_content_class(initialized_project: Path) -> None:
+    protected_id = _capture_record(
+        initialized_project,
+        source_ref="session://gov-context",
+        captured_at="2026-01-01T00:00:00Z",
+        ttl_expires_at="2026-12-31T00:00:00Z",
+        text="governance trace note",
+        content_class="governance_context",
+        tags="phase2",
+    )
+
+    proc = run_coach(
+        initialized_project,
+        "memory-prune",
+        "--expired-before",
+        "2026-01-01T00:00:00Z",
+        "--compaction-policy",
+        "stale_only",
+        "--stale-before",
+        "2026-02-01T00:00:00Z",
+        "--no-dry-run",
+        "--format",
+        "json",
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "pass"
+    assert payload["result"]["summary"]["pruned_count"] == 0
+    assert payload["result"]["summary"]["protected_skip_count"] == 1
+    action = payload["result"]["actions"][0]
+    assert action["record_id"] == protected_id
+    assert action["decision"] == "skip"
+    assert action["reason"] == "protected_content_class"
+    assert "protected_content_class" in action["protection_blocks"]
+
+
+def test_memory_prune_duplicate_compaction_keeps_latest_record(initialized_project: Path) -> None:
+    older_id = _capture_record(
+        initialized_project,
+        source_ref="session://dup",
+        captured_at="2026-01-01T00:00:00Z",
+        ttl_expires_at="2026-12-31T00:00:00Z",
+        text="same duplicate compaction text",
+        tags="phase2",
+    )
+    newer_id = _capture_record(
+        initialized_project,
+        source_ref="session://dup",
+        captured_at="2026-01-15T00:00:00Z",
+        ttl_expires_at="2026-12-31T00:00:00Z",
+        text="same duplicate compaction text",
+        tags="phase2",
+    )
+
+    proc = run_coach(
+        initialized_project,
+        "memory-prune",
+        "--expired-before",
+        "2026-01-01T00:00:00Z",
+        "--compaction-policy",
+        "stale_and_duplicate",
+        "--no-dry-run",
+        "--format",
+        "json",
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "pass"
+    assert payload["result"]["summary"]["candidate_count"] == 1
+    assert payload["result"]["summary"]["duplicate_candidate_count"] == 1
+    action = payload["result"]["actions"][0]
+    assert action["record_id"] == older_id
+    assert action["reason"] == "duplicate_compaction"
+    assert "duplicate_compaction" in action["matched_criteria"]
+
+    records_path = initialized_project / ".cortex" / "state" / "tactical_memory" / "records_v0.jsonl"
+    remaining = {row["record_id"] for row in _read_jsonl(records_path)}
+    assert older_id not in remaining
+    assert newer_id in remaining
 
 
 def test_memory_prune_lock_conflict_returns_exit_4(initialized_project: Path) -> None:

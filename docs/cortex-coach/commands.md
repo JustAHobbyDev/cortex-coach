@@ -131,6 +131,8 @@ cortex-coach memory-prune \
   --project-dir /path/to/project \
   --expired-before 2026-03-01T00:00:00Z \
   --policy-violation-classes-any secret,credential \
+  --compaction-policy stale_only \
+  --stale-before 2026-02-15T00:00:00Z \
   --dry-run \
   --format json
 ```
@@ -147,6 +149,19 @@ cortex-coach memory-prune \
 
 Ordering policy:
 - `decision_then_record_id_asc` (`prune` before `skip`)
+
+Compaction policies:
+- `disabled` (default)
+- `stale_only` (requires `--stale-before`)
+- `stale_and_duplicate` (duplicate key keeps latest by `captured_at`, then `record_id`)
+
+Protected compaction controls:
+- `--protected-content-classes-any` defaults to `decision_signal,governance_context,incident_note`
+- `--protected-tags-any` defaults to `governance_linked,no_compact,promotion_candidate`
+
+PH2-004 reason codes:
+- prune reasons: `expired_ttl`, `policy_violation`, `stale_compaction`, `duplicate_compaction`
+- skip reasons: `dry_run_only`, `protected_content_class`, `protected_tag`, `linked_governance_dependency`
 
 ### `memory-promote`
 
