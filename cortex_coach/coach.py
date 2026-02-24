@@ -97,6 +97,11 @@ PROMOTION_CANDIDATE_TIE_BREAK_ORDER = [
     "governance_impact_priority_asc",
     "candidate_id_asc",
 ]
+ROLLOUT_MODE_CHOICES = ["off", "experimental", "default"]
+DEFAULT_ROLLOUT_MODE = "experimental"
+ROLLOUT_MODE_STATE_REL_PATH = "state/rollout_mode_state_v0.json"
+ROLLOUT_MODE_TRANSITIONS_REL_PATH = "state/rollout_mode_transitions_v0.jsonl"
+ROLLOUT_MODE_AUDIT_REPORT_REL_PATH = "reports/project_state/phase5_mode_transition_audit_report_v0.json"
 TACTICAL_MEMORY_RECORDS_REL_PATH = "state/tactical_memory/records_v0.jsonl"
 TACTICAL_MEMORY_SANITIZATION_INCIDENTS_REL_PATH = "state/tactical_memory/sanitization_incidents_v0.jsonl"
 MEMORY_EXIT_SUCCESS = 0
@@ -435,6 +440,67 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         f.write(line)
         f.flush()
         os.fsync(f.fileno())
+
+
+def load_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+def rollout_mode_paths(cortex_dir: Path) -> tuple[Path, Path]:
+    state_path = cortex_dir / ROLLOUT_MODE_STATE_REL_PATH
+    transitions_path = cortex_dir / ROLLOUT_MODE_TRANSITIONS_REL_PATH
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    transitions_path.parent.mkdir(parents=True, exist_ok=True)
+    return state_path, transitions_path
+
+
+def load_rollout_mode_state(cortex_dir: Path) -> dict[str, Any]:
+    state_path, _ = rollout_mode_paths(cortex_dir)
+    if not state_path.exists():
+        return {
+            "version": "v0",
+            "mode": DEFAULT_ROLLOUT_MODE,
+            "updated_at": utc_now(),
+            "updated_by": "bootstrap",
+            "reason": "default_rollout_mode",
+        }
+    try:
+        obj = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {
+            "version": "v0",
+            "mode": DEFAULT_ROLLOUT_MODE,
+            "updated_at": utc_now(),
+            "updated_by": "fallback",
+            "reason": "invalid_rollout_mode_state_recovered",
+        }
+    if not isinstance(obj, dict):
+        return {
+            "version": "v0",
+            "mode": DEFAULT_ROLLOUT_MODE,
+            "updated_at": utc_now(),
+            "updated_by": "fallback",
+            "reason": "non_object_rollout_mode_state_recovered",
+        }
+    mode = str(obj.get("mode", DEFAULT_ROLLOUT_MODE)).strip().lower()
+    if mode not in ROLLOUT_MODE_CHOICES:
+        mode = DEFAULT_ROLLOUT_MODE
+    obj["version"] = "v0"
+    obj["mode"] = mode
+    return obj
 
 
 def tactical_record_exists(records_path: Path, record_id: str) -> bool:
@@ -4692,6 +4758,283 @@ def decision_promote_project(args: argparse.Namespace) -> int:
     return 0
 
 
+def rollout_mode_project(args: argparse.Namespace) -> int:
+    command = "rollout-mode"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    state_path, transitions_path = rollout_mode_paths(cortex_dir)
+    state = load_rollout_mode_state(cortex_dir)
+    transitions = load_jsonl_objects(transitions_path)
+
+    target_mode = getattr(args, "set_mode", None)
+    if target_mode is None:
+        result = {
+            "mode": str(state.get("mode", DEFAULT_ROLLOUT_MODE)),
+            "state_path": str(state_path.relative_to(project_dir)),
+            "transitions_path": str(transitions_path.relative_to(project_dir)),
+            "transition_count": len(transitions),
+        }
+        payload = build_command_response(
+            command=command,
+            status="pass",
+            project_dir=project_dir,
+            result=result,
+        )
+        if args.out_file:
+            out = Path(args.out_file)
+            if not out.is_absolute():
+                out = project_dir / out
+            atomic_write_text(out, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        emit_command_payload(payload, args.format)
+        return 0
+
+    try:
+        previous_mode = str(state.get("mode", DEFAULT_ROLLOUT_MODE)).strip().lower() or DEFAULT_ROLLOUT_MODE
+        target_mode = str(target_mode).strip().lower()
+        changed_by = str(getattr(args, "changed_by", "")).strip()
+        reason = str(getattr(args, "reason", "")).strip()
+        decision_refs = parse_unique_sorted_csv(getattr(args, "decision_refs", None))
+        reflection_refs = parse_unique_sorted_csv(getattr(args, "reflection_refs", None))
+        audit_refs = parse_unique_sorted_csv(getattr(args, "audit_refs", None))
+        incident_ref = str(getattr(args, "incident_ref", "")).strip()
+        changed_at = parse_optional_rfc3339_utc(getattr(args, "changed_at", None), "changed_at") or utc_now()
+
+        if target_mode not in ROLLOUT_MODE_CHOICES:
+            raise ValueError(f"unsupported rollout mode: {target_mode}")
+        if not changed_by:
+            raise ValueError("changed_by is required when setting rollout mode")
+        if not reason:
+            raise ValueError("reason is required when setting rollout mode")
+        if target_mode == "default":
+            if not decision_refs or not reflection_refs or not audit_refs:
+                raise ValueError("default mode requires decision_refs, reflection_refs, and audit_refs")
+        if previous_mode == "default" and target_mode in {"experimental", "off"} and not incident_ref:
+            raise ValueError("rollback from default requires incident_ref")
+
+        if previous_mode == target_mode:
+            result = {
+                "mode": target_mode,
+                "previous_mode": previous_mode,
+                "transition_applied": False,
+                "state_path": str(state_path.relative_to(project_dir)),
+                "transitions_path": str(transitions_path.relative_to(project_dir)),
+                "transition_count": len(transitions),
+            }
+            payload = build_command_response(
+                command=command,
+                status="pass",
+                project_dir=project_dir,
+                result=result,
+            )
+            if args.out_file:
+                out = Path(args.out_file)
+                if not out.is_absolute():
+                    out = project_dir / out
+                atomic_write_text(out, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            emit_command_payload(payload, args.format)
+            return 0
+
+        transition_id = f"rmt_{stable_hash_payload({'from': previous_mode, 'to': target_mode, 'at': changed_at, 'by': changed_by})[:16]}"
+        transition = {
+            "version": "v0",
+            "transition_id": transition_id,
+            "from_mode": previous_mode,
+            "to_mode": target_mode,
+            "changed_at": changed_at,
+            "changed_by": changed_by,
+            "reason": reason,
+            "decision_refs": decision_refs,
+            "reflection_refs": reflection_refs,
+            "audit_refs": audit_refs,
+            "incident_ref": incident_ref,
+        }
+        append_jsonl(transitions_path, transition)
+
+        next_state = {
+            "version": "v0",
+            "mode": target_mode,
+            "updated_at": changed_at,
+            "updated_by": changed_by,
+            "reason": reason,
+            "last_transition_id": transition_id,
+            "decision_refs": decision_refs,
+            "reflection_refs": reflection_refs,
+            "audit_refs": audit_refs,
+        }
+        if incident_ref:
+            next_state["incident_ref"] = incident_ref
+        atomic_write_text(state_path, json.dumps(next_state, indent=2, sort_keys=True) + "\n")
+
+        updated_transitions = load_jsonl_objects(transitions_path)
+        result = {
+            "mode": target_mode,
+            "previous_mode": previous_mode,
+            "transition_applied": True,
+            "transition_id": transition_id,
+            "state_path": str(state_path.relative_to(project_dir)),
+            "transitions_path": str(transitions_path.relative_to(project_dir)),
+            "transition_count": len(updated_transitions),
+            "default_mode_linkage_complete": bool(decision_refs) and bool(reflection_refs) and bool(audit_refs),
+        }
+        payload = build_command_response(
+            command=command,
+            status="pass",
+            project_dir=project_dir,
+            result=result,
+        )
+        if args.out_file:
+            out = Path(args.out_file)
+            if not out.is_absolute():
+                out = project_dir / out
+            atomic_write_text(out, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        emit_command_payload(payload, args.format)
+        return 0
+    except ValueError as exc:
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "set_mode": target_mode,
+                "state_path": str(state_path.relative_to(project_dir)),
+                "transitions_path": str(transitions_path.relative_to(project_dir)),
+            },
+            error={"code": "invalid_arguments", "message": str(exc)},
+        )
+        emit_command_payload(payload, args.format)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        payload = build_command_response(
+            command=command,
+            status="fail",
+            project_dir=project_dir,
+            result={
+                "set_mode": target_mode,
+                "state_path": str(state_path.relative_to(project_dir)),
+                "transitions_path": str(transitions_path.relative_to(project_dir)),
+            },
+            error={"code": "internal_error", "message": str(exc)},
+        )
+        emit_command_payload(payload, args.format)
+        return 5
+
+
+def rollout_mode_audit_project(args: argparse.Namespace) -> int:
+    command = "rollout-mode-audit"
+    project_dir = Path(args.project_dir).resolve()
+    cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
+    state_path, transitions_path = rollout_mode_paths(cortex_dir)
+    state = load_rollout_mode_state(cortex_dir)
+    transitions = load_jsonl_objects(transitions_path)
+
+    findings: list[dict[str, Any]] = []
+    complete_transitions = 0
+    for item in transitions:
+        transition_id = str(item.get("transition_id", "unknown"))
+        missing_fields: list[str] = []
+        from_mode = str(item.get("from_mode", "")).strip().lower()
+        to_mode = str(item.get("to_mode", "")).strip().lower()
+        changed_at = str(item.get("changed_at", "")).strip()
+        changed_by = str(item.get("changed_by", "")).strip()
+        reason = str(item.get("reason", "")).strip()
+        decision_refs = _to_string_list(item.get("decision_refs", []))
+        reflection_refs = _to_string_list(item.get("reflection_refs", []))
+        audit_refs = _to_string_list(item.get("audit_refs", []))
+        incident_ref = str(item.get("incident_ref", "")).strip()
+
+        if from_mode not in ROLLOUT_MODE_CHOICES:
+            missing_fields.append("from_mode")
+        if to_mode not in ROLLOUT_MODE_CHOICES:
+            missing_fields.append("to_mode")
+        if not changed_at:
+            missing_fields.append("changed_at")
+        if not changed_by:
+            missing_fields.append("changed_by")
+        if not reason:
+            missing_fields.append("reason")
+        if to_mode == "default":
+            if not decision_refs:
+                missing_fields.append("decision_refs")
+            if not reflection_refs:
+                missing_fields.append("reflection_refs")
+            if not audit_refs:
+                missing_fields.append("audit_refs")
+        if from_mode == "default" and to_mode in {"experimental", "off"} and not incident_ref:
+            missing_fields.append("incident_ref")
+
+        if missing_fields:
+            findings.append(
+                {
+                    "check": "transition_metadata_incomplete",
+                    "transition_id": transition_id,
+                    "missing_fields": sorted(set(missing_fields)),
+                    "from_mode": from_mode,
+                    "to_mode": to_mode,
+                }
+            )
+            continue
+        complete_transitions += 1
+
+    current_mode = str(state.get("mode", DEFAULT_ROLLOUT_MODE)).strip().lower() or DEFAULT_ROLLOUT_MODE
+    state_valid = current_mode in ROLLOUT_MODE_CHOICES
+    if not state_valid:
+        findings.append(
+            {
+                "check": "invalid_state_mode",
+                "state_mode": current_mode,
+            }
+        )
+
+    transition_count = len(transitions)
+    completeness_rate = float(complete_transitions) / max(1, transition_count)
+    status = "pass" if not findings and state_valid else "fail"
+
+    report = {
+        "version": "v0",
+        "artifact": "phase5_mode_transition_audit_report_v0",
+        "run_at": utc_now(),
+        "project_dir": str(project_dir),
+        "status": status,
+        "state_mode": current_mode,
+        "state_path": str(state_path.relative_to(project_dir)),
+        "transitions_path": str(transitions_path.relative_to(project_dir)),
+        "summary": {
+            "transition_count": transition_count,
+            "complete_transition_count": complete_transitions,
+            "transition_completeness_rate": round(completeness_rate, 6),
+            "finding_count": len(findings),
+        },
+        "targets": {
+            "transition_completeness_rate": 1.0,
+        },
+        "target_results": {
+            "transition_completeness_rate_met": completeness_rate >= 1.0 and state_valid,
+        },
+        "findings": findings,
+    }
+
+    out_path = Path(args.out_file) if args.out_file else (cortex_dir / ROLLOUT_MODE_AUDIT_REPORT_REL_PATH)
+    if not out_path.is_absolute():
+        out_path = project_dir / out_path
+    atomic_write_text(out_path, json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+    payload = build_command_response(
+        command=command,
+        status=status,
+        project_dir=project_dir,
+        result={
+            "report_path": str(out_path.relative_to(project_dir)),
+            "transition_count": transition_count,
+            "transition_completeness_rate": round(completeness_rate, 6),
+            "state_mode": current_mode,
+            "finding_count": len(findings),
+        },
+        error={"code": "rollout_transition_audit_failed", "message": "transition audit has findings"} if status != "pass" else None,
+    )
+    emit_command_payload(payload, args.format)
+    return 0 if status == "pass" else 1
+
+
 def contract_check_project(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir).resolve()
     cortex_dir = resolve_cortex_dir(project_dir, getattr(args, "cortex_root", None))
@@ -5247,6 +5590,61 @@ def build_parser() -> argparse.ArgumentParser:
     p_decision_promote.add_argument("--format", choices=["text", "json"], default="text")
     add_lock_args(p_decision_promote)
     p_decision_promote.set_defaults(func=decision_promote_project)
+
+    p_rollout_mode = sub.add_parser(
+        "rollout-mode",
+        help="Get or set rollout mode (`off`, `experimental`, `default`) with transition logging.",
+    )
+    p_rollout_mode.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_rollout_mode)
+    p_rollout_mode.add_argument("--format", choices=["text", "json"], default="text")
+    p_rollout_mode.add_argument(
+        "--set-mode",
+        choices=ROLLOUT_MODE_CHOICES,
+        help="Target rollout mode to set. If omitted, current mode is returned.",
+    )
+    p_rollout_mode.add_argument("--changed-by", help="Actor performing the transition (required when setting mode).")
+    p_rollout_mode.add_argument("--reason", help="Transition rationale (required when setting mode).")
+    p_rollout_mode.add_argument(
+        "--decision-refs",
+        default="",
+        help="Comma-separated promoted decision references (required for --set-mode default).",
+    )
+    p_rollout_mode.add_argument(
+        "--reflection-refs",
+        default="",
+        help="Comma-separated reflection references (required for --set-mode default).",
+    )
+    p_rollout_mode.add_argument(
+        "--audit-refs",
+        default="",
+        help="Comma-separated audit references (required for --set-mode default).",
+    )
+    p_rollout_mode.add_argument(
+        "--incident-ref",
+        default="",
+        help="Incident/recovery reference required when rolling back from default.",
+    )
+    p_rollout_mode.add_argument(
+        "--changed-at",
+        help="Optional RFC3339 timestamp override used for deterministic replay/testing.",
+    )
+    p_rollout_mode.add_argument("--out-file")
+    add_lock_args(p_rollout_mode)
+    p_rollout_mode.set_defaults(func=rollout_mode_project)
+
+    p_rollout_mode_audit = sub.add_parser(
+        "rollout-mode-audit",
+        help="Validate rollout-mode transition metadata completeness and write audit report.",
+    )
+    p_rollout_mode_audit.add_argument("--project-dir", required=True)
+    add_cortex_root_arg(p_rollout_mode_audit)
+    p_rollout_mode_audit.add_argument("--format", choices=["text", "json"], default="text")
+    p_rollout_mode_audit.add_argument(
+        "--out-file",
+        help=f"Optional output report path (default: <cortex-root>/{ROLLOUT_MODE_AUDIT_REPORT_REL_PATH}).",
+    )
+    p_rollout_mode_audit.set_defaults(func=rollout_mode_audit_project)
 
     p_contract_check = sub.add_parser(
         "contract-check",

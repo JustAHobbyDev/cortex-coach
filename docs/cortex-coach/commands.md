@@ -233,6 +233,50 @@ Output includes:
 - enforcement hint (`eligible_for_promotion` or `block_unlinked_governance_closure`)
 - per-candidate contract-shape validation status (`contract_candidate_valid`)
 
+### `rollout-mode`
+
+Get or set rollout mode (`off`, `experimental`, `default`) with deterministic transition logging.
+
+Read current mode:
+
+```bash
+cortex-coach rollout-mode \
+  --project-dir /path/to/project \
+  --format json
+```
+
+Set mode:
+
+```bash
+cortex-coach rollout-mode \
+  --project-dir /path/to/project \
+  --set-mode default \
+  --changed-by maintainer_a \
+  --reason "Gate F approved" \
+  --decision-refs dec_gate_f_001 \
+  --reflection-refs ref_gate_f_001 \
+  --audit-refs .cortex/reports/project_state/phase5_cycle2_rollout_reliability_report_v0.json \
+  --format json
+```
+
+Transition rules:
+- `--set-mode default` requires `--decision-refs`, `--reflection-refs`, and `--audit-refs`
+- rollback from `default` to `experimental|off` requires `--incident-ref`
+- transitions are appended to `.cortex/state/rollout_mode_transitions_v0.jsonl`
+
+### `rollout-mode-audit`
+
+Validate transition metadata completeness and emit mode-transition audit artifact.
+
+```bash
+cortex-coach rollout-mode-audit \
+  --project-dir /path/to/project \
+  --format json
+```
+
+Default report output:
+- `.cortex/reports/project_state/phase5_mode_transition_audit_report_v0.json`
+
 ## `init`
 
 Bootstrap `.cortex/` artifacts in a target project.
