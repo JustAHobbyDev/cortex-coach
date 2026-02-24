@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
-from conftest import run_coach
+from conftest import COACH_SCRIPT, run_coach
 
 
 def test_context_load_fallback_metadata(initialized_project: Path) -> None:
@@ -120,3 +121,89 @@ def test_context_load_ranking_tie_break_falls_back_to_path_order(initialized_pro
         "outcome_score",
         "freshness_score",
     }
+
+
+def test_context_load_weighting_mode_can_change_ranking(initialized_project: Path) -> None:
+    policy_dir = initialized_project / "policies"
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    lexical_heavy = policy_dir / "governance_governance_notes.md"
+    evidence_outcome_heavy = policy_dir / "decision_reflection_report_policy_gate_plan.md"
+    lexical_heavy.write_text("governance governance governance governance governance", encoding="utf-8")
+    evidence_outcome_heavy.write_text("context document with governance evidence markers", encoding="utf-8")
+
+    out_uniform = initialized_project / ".cortex" / "reports" / "bundle_uniform.json"
+    out_bias = initialized_project / ".cortex" / "reports" / "bundle_bias.json"
+
+    run_coach(
+        initialized_project,
+        "context-load",
+        "--task",
+        "governance",
+        "--weighting-mode",
+        "uniform",
+        "--max-files",
+        "24",
+        "--max-chars-per-file",
+        "800",
+        "--out-file",
+        str(out_uniform),
+    )
+    run_coach(
+        initialized_project,
+        "context-load",
+        "--task",
+        "governance",
+        "--weighting-mode",
+        "evidence_outcome_bias",
+        "--max-files",
+        "24",
+        "--max-chars-per-file",
+        "800",
+        "--out-file",
+        str(out_bias),
+    )
+
+    payload_uniform = json.loads(out_uniform.read_text(encoding="utf-8"))
+    payload_bias = json.loads(out_bias.read_text(encoding="utf-8"))
+
+    files_uniform = [f for f in payload_uniform["files"] if str(f.get("selected_by", "")).startswith("task:")]
+    files_bias = [f for f in payload_bias["files"] if str(f.get("selected_by", "")).startswith("task:")]
+
+    idx_uniform_lexical = next(
+        i for i, item in enumerate(files_uniform) if item["path"] == "policies/governance_governance_notes.md"
+    )
+    idx_uniform_evidence = next(
+        i for i, item in enumerate(files_uniform) if item["path"] == "policies/decision_reflection_report_policy_gate_plan.md"
+    )
+    idx_bias_lexical = next(i for i, item in enumerate(files_bias) if item["path"] == "policies/governance_governance_notes.md")
+    idx_bias_evidence = next(
+        i for i, item in enumerate(files_bias) if item["path"] == "policies/decision_reflection_report_policy_gate_plan.md"
+    )
+
+    assert idx_uniform_lexical < idx_uniform_evidence
+    assert idx_bias_evidence < idx_bias_lexical
+    assert payload_uniform["weighting_mode"] == "uniform"
+    assert payload_bias["weighting_mode"] == "evidence_outcome_bias"
+    assert payload_uniform["ranking"]["weights"] != payload_bias["ranking"]["weights"]
+
+
+def test_context_load_invalid_weighting_mode_fails_argument_validation(initialized_project: Path) -> None:
+    proc = subprocess.run(
+        [
+            "python3",
+            str(COACH_SCRIPT),
+            "context-load",
+            "--task",
+            "governance",
+            "--weighting-mode",
+            "not_a_mode",
+            "--project-dir",
+            str(initialized_project),
+        ],
+        cwd=str(COACH_SCRIPT.parent.parent),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "invalid choice" in proc.stderr

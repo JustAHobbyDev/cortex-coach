@@ -384,6 +384,10 @@ Supported weighting presets:
 - `uniform`
 - `evidence_outcome_bias`
 
+Preset behavior:
+- `uniform`: favors lexical/task-match strength while still considering evidence/outcome signals.
+- `evidence_outcome_bias`: raises weight of governance evidence and outcome-oriented signals for noisy/stale histories.
+
 ## `context-policy`
 
 Analyze repository shape and recommend task focus + context budgets.
