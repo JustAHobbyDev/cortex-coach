@@ -15,6 +15,7 @@ All Phase 1 tactical memory commands are implemented:
 - `memory-diff`
 - `memory-prune`
 - `memory-promote`
+- `promotion-candidates`
 
 ### `memory-record`
 
@@ -197,6 +198,40 @@ Bridge guarantees:
 - governance mode fails closed when required promotion sections are missing
 - bridge metadata sets `bridge_command=memory-promote`
 - non-governance output is explicitly marked to prevent canonical closure confusion
+
+### `promotion-candidates`
+
+Build deterministic promotion-assistant candidates from frozen tactical fixtures.
+
+```bash
+cortex-coach promotion-candidates \
+  --project-dir /path/to/project \
+  --fixture-file .cortex/fixtures/phase4_promotion/medium_mixed_tactical_cluster_v0.json \
+  --query "governance linkage evidence" \
+  --score-mode evidence_bias \
+  --candidate-limit 8 \
+  --format json
+```
+
+Supported fixture shapes:
+- `tactical_candidates[]`
+- `governance_debt_items[]`
+
+Deterministic ranking order:
+1. `combined_score_desc`
+2. `evidence_coverage_desc`
+3. `governance_impact_priority_asc`
+4. `candidate_id_asc`
+
+Scoring modes:
+- `uniform` (equal weight across lexical/evidence/linkage/impact)
+- `evidence_bias` (extra weight on evidence coverage + linkage)
+
+Output includes:
+- ranked `candidates[]` with `rank`
+- `score_breakdown` and `combined_score`
+- enforcement hint (`eligible_for_promotion` or `block_unlinked_governance_closure`)
+- per-candidate contract-shape validation status (`contract_candidate_valid`)
 
 ## `init`
 
