@@ -10,12 +10,36 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_MAX_FILES = 12
 DEFAULT_MAX_CHARS_PER_FILE = 2500
+
+CONTEXT_LOAD_RANKING_CONTRACT_VERSION = "v0"
+CONTEXT_LOAD_RETRIEVAL_PROFILES = ("small", "medium", "large")
+CONTEXT_LOAD_WEIGHT_PRESETS = {
+    "uniform": {
+        "lexical_score": 0.55,
+        "evidence_score": 0.20,
+        "outcome_score": 0.15,
+        "freshness_score": 0.10,
+    },
+    "evidence_outcome_bias": {
+        "lexical_score": 0.40,
+        "evidence_score": 0.30,
+        "outcome_score": 0.20,
+        "freshness_score": 0.10,
+    },
+}
+CONTEXT_LOAD_TIE_BREAK_ORDER = [
+    "combined_score_desc",
+    "evidence_score_desc",
+    "pattern_priority_asc",
+    "path_asc",
+]
 
 CONTROL_PLANE_ORDER = [
     ".cortex/manifest_v0.json",
@@ -56,6 +80,18 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--project-dir", required=True)
     p.add_argument("--task", default="default")
+    p.add_argument(
+        "--retrieval-profile",
+        choices=CONTEXT_LOAD_RETRIEVAL_PROFILES,
+        default="medium",
+        help="Retrieval evaluation profile label for ranking metadata (default: medium).",
+    )
+    p.add_argument(
+        "--weighting-mode",
+        choices=sorted(CONTEXT_LOAD_WEIGHT_PRESETS.keys()),
+        default="uniform",
+        help="Deterministic score weighting preset (default: uniform).",
+    )
     p.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES)
     p.add_argument("--max-chars-per-file", type=int, default=DEFAULT_MAX_CHARS_PER_FILE)
     p.add_argument(
@@ -129,11 +165,92 @@ def select_control_plane(project_dir: Path) -> tuple[list[dict[str, Any]], list[
     return selected, warnings
 
 
-def select_task_files(project_dir: Path, task_key: str) -> list[dict[str, Any]]:
+def _tokenize(value: str) -> list[str]:
+    out: list[str] = []
+    for tok in re.findall(r"[a-z0-9]+", value.lower()):
+        if len(tok) < 3:
+            continue
+        out.append(tok)
+    return out
+
+
+def _query_tokens(task: str, task_key: str) -> list[str]:
+    tokens = set(_tokenize(task))
+    tokens.add(task_key.lower())
+    return sorted(tokens)
+
+
+def _count_hits(text: str, tokens: list[str]) -> int:
+    if not tokens:
+        return 0
+    lowered = text.lower()
+    return sum(lowered.count(tok) for tok in tokens)
+
+
+def _score_from_hits(hit_count: int, norm: float) -> float:
+    if hit_count <= 0:
+        return 0.0
+    return round(min(1.0, float(hit_count) / norm), 6)
+
+
+def _confidence_from_combined(combined_score: float) -> float:
+    if combined_score <= 0:
+        return 0.0
+    return round(min(1.0, combined_score / (combined_score + 0.35)), 6)
+
+
+def _score_task_entry(
+    project_dir: Path,
+    entry: dict[str, Any],
+    task_tokens: list[str],
+    weight_map: dict[str, float],
+) -> dict[str, Any]:
+    rel_path = str(entry["path"])
+    path_hits = _count_hits(rel_path, task_tokens)
+
+    try:
+        text = (project_dir / rel_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    text = text[:6000]
+    text_hits = _count_hits(text, task_tokens)
+
+    lexical_score = _score_from_hits((path_hits * 3) + text_hits, norm=10.0)
+    evidence_hits = _count_hits(rel_path, ["decision", "reflection", "report", "artifact", "policy", "spec", "contract"])
+    evidence_score = _score_from_hits(evidence_hits, norm=3.0)
+    outcome_hits = _count_hits(rel_path, ["closeout", "handoff", "readiness", "gate", "regression", "plan"])
+    outcome_score = _score_from_hits(outcome_hits, norm=2.0)
+    freshness_score = 0.0
+
+    breakdown = {
+        "lexical_score": lexical_score,
+        "evidence_score": evidence_score,
+        "outcome_score": outcome_score,
+        "freshness_score": freshness_score,
+    }
+    combined_score = round(
+        (weight_map["lexical_score"] * lexical_score)
+        + (weight_map["evidence_score"] * evidence_score)
+        + (weight_map["outcome_score"] * outcome_score)
+        + (weight_map["freshness_score"] * freshness_score),
+        6,
+    )
+    entry["score_breakdown"] = breakdown
+    entry["combined_score"] = combined_score
+    entry["confidence"] = _confidence_from_combined(combined_score)
+    return entry
+
+
+def select_task_files(
+    project_dir: Path,
+    task: str,
+    task_key: str,
+    weighting_mode: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     patterns = TASK_PATTERNS.get(task_key, TASK_PATTERNS["default"])
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for pat in patterns:
+    for pattern_index, pat in enumerate(patterns):
         for p in sorted(project_dir.glob(pat)):
             if not p.is_file():
                 continue
@@ -141,13 +258,46 @@ def select_task_files(project_dir: Path, task_key: str) -> list[dict[str, Any]]:
             if rel in seen:
                 continue
             seen.add(rel)
-            out.append({"path": rel, "selected_by": f"task:{task_key}:{pat}"})
-    return out
+            out.append(
+                {
+                    "path": rel,
+                    "selected_by": f"task:{task_key}:{pat}",
+                    "pattern_priority": pattern_index,
+                }
+            )
+
+    task_tokens = _query_tokens(task, task_key)
+    weight_map = CONTEXT_LOAD_WEIGHT_PRESETS[weighting_mode]
+    scored = [_score_task_entry(project_dir, entry, task_tokens, weight_map) for entry in out]
+    ranked = sorted(
+        scored,
+        key=lambda item: (
+            -float(item.get("combined_score", 0.0)),
+            -float(item["score_breakdown"]["evidence_score"]),
+            int(item.get("pattern_priority", 0)),
+            item["path"],
+        ),
+    )
+    for idx, entry in enumerate(ranked, start=1):
+        entry["rank"] = idx
+
+    ranking_meta = {
+        "contract_version": CONTEXT_LOAD_RANKING_CONTRACT_VERSION,
+        "retrieval_profile": None,  # populated by build_bundle
+        "weighting_mode": weighting_mode,
+        "weights": dict(weight_map),
+        "tie_break_order": list(CONTEXT_LOAD_TIE_BREAK_ORDER),
+        "query_tokens": task_tokens,
+        "candidate_count": len(ranked),
+    }
+    return ranked, ranking_meta
 
 
 def build_bundle(
     project_dir: Path,
     task: str,
+    retrieval_profile: str,
+    weighting_mode: str,
     max_files: int,
     max_chars_per_file: int,
     unrestricted: bool = False,
@@ -158,7 +308,8 @@ def build_bundle(
     control_files, control_warnings = select_control_plane(project_dir)
     warnings.extend(control_warnings)
 
-    task_files = select_task_files(project_dir, task_key)
+    task_files, ranking_meta = select_task_files(project_dir, task, task_key, weighting_mode)
+    ranking_meta["retrieval_profile"] = retrieval_profile
     selected_meta: list[dict[str, Any]] = []
 
     # Always include control plane first.
@@ -194,6 +345,10 @@ def build_bundle(
             {
                 "path": entry["path"],
                 "selected_by": entry["selected_by"],
+                "rank": entry.get("rank"),
+                "combined_score": entry.get("combined_score"),
+                "confidence": entry.get("confidence"),
+                "score_breakdown": entry.get("score_breakdown"),
                 "truncated": truncated,
                 "excerpt": excerpt,
             }
@@ -205,6 +360,9 @@ def build_bundle(
         "assets_dir": None,
         "task": task,
         "task_key": task_key,
+        "retrieval_profile": retrieval_profile,
+        "weighting_mode": weighting_mode,
+        "ranking": ranking_meta,
         "budget": {
             "max_files": None if unrestricted else max_files,
             "max_chars_per_file": None if unrestricted else max_chars_per_file,
@@ -239,6 +397,8 @@ def main() -> int:
     bundle = build_bundle(
         project_dir=project_dir,
         task=args.task,
+        retrieval_profile=args.retrieval_profile,
+        weighting_mode=args.weighting_mode,
         max_files=base_files,
         max_chars_per_file=base_chars,
     )
@@ -262,6 +422,8 @@ def main() -> int:
         relaxed = build_bundle(
             project_dir=project_dir,
             task=args.task,
+            retrieval_profile=args.retrieval_profile,
+            weighting_mode=args.weighting_mode,
             max_files=relaxed_files,
             max_chars_per_file=relaxed_chars,
         )
@@ -283,6 +445,8 @@ def main() -> int:
         unrestricted = build_bundle(
             project_dir=project_dir,
             task=args.task,
+            retrieval_profile=args.retrieval_profile,
+            weighting_mode=args.weighting_mode,
             max_files=base_files,
             max_chars_per_file=base_chars,
             unrestricted=True,

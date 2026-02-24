@@ -347,6 +347,8 @@ Generate a bounded context bundle for agent handoff.
 cortex-coach context-load \
   --project-dir /path/to/project \
   --task "design drift" \
+  --retrieval-profile medium \
+  --weighting-mode uniform \
   --max-files 10 \
   --max-chars-per-file 2000 \
   --fallback-mode priority \
@@ -366,6 +368,21 @@ cortex-coach context-load \
 1. restricted budget
 2. relaxed budget
 3. unrestricted (no file/char limits) if prior levels fail
+
+Deterministic ranking contract:
+1. `combined_score_desc`
+2. `evidence_score_desc`
+3. `pattern_priority_asc`
+4. `path_asc`
+
+Supported retrieval profiles:
+- `small`
+- `medium`
+- `large`
+
+Supported weighting presets:
+- `uniform`
+- `evidence_outcome_bias`
 
 ## `context-policy`
 

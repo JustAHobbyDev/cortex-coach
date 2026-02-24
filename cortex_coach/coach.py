@@ -2200,6 +2200,10 @@ def context_load_project(args: argparse.Namespace) -> int:
         str(project_dir),
         "--task",
         args.task,
+        "--retrieval-profile",
+        args.retrieval_profile,
+        "--weighting-mode",
+        args.weighting_mode,
         "--max-files",
         str(args.max_files),
         "--max-chars-per-file",
@@ -4537,6 +4541,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_context_load.add_argument("--project-dir", required=True)
     p_context_load.add_argument("--task", default="default")
+    p_context_load.add_argument(
+        "--retrieval-profile",
+        choices=["small", "medium", "large"],
+        default="medium",
+        help="Retrieval profile label used for deterministic context ranking metadata.",
+    )
+    p_context_load.add_argument(
+        "--weighting-mode",
+        choices=["uniform", "evidence_outcome_bias"],
+        default="uniform",
+        help="Deterministic ranking weighting preset.",
+    )
     p_context_load.add_argument("--max-files", type=int, default=12)
     p_context_load.add_argument("--max-chars-per-file", type=int, default=2500)
     p_context_load.add_argument(
