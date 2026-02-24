@@ -40,6 +40,10 @@ CONTEXT_LOAD_TIE_BREAK_ORDER = [
     "pattern_priority_asc",
     "path_asc",
 ]
+CONTEXT_LOAD_CONFIDENCE_BOUNDS = {
+    "min": 0.0,
+    "max": 1.0,
+}
 
 CONTROL_PLANE_ORDER = [
     ".cortex/manifest_v0.json",
@@ -199,6 +203,56 @@ def _confidence_from_combined(combined_score: float) -> float:
     return round(min(1.0, combined_score / (combined_score + 0.35)), 6)
 
 
+def _clamp_confidence(value: float) -> float:
+    lower = float(CONTEXT_LOAD_CONFIDENCE_BOUNDS["min"])
+    upper = float(CONTEXT_LOAD_CONFIDENCE_BOUNDS["max"])
+    return round(max(lower, min(upper, float(value))), 6)
+
+
+def _default_control_plane_score(selected_by: str) -> tuple[float, float, dict[str, float]]:
+    if selected_by.startswith("control_plane:active_decision"):
+        breakdown = {
+            "lexical_score": 0.70,
+            "evidence_score": 1.0,
+            "outcome_score": 0.95,
+            "freshness_score": 0.0,
+        }
+        return 0.90, 0.98, breakdown
+    breakdown = {
+        "lexical_score": 0.65,
+        "evidence_score": 1.0,
+        "outcome_score": 0.90,
+        "freshness_score": 0.0,
+    }
+    return 0.87, 0.97, breakdown
+
+
+def _entry_provenance(entry: dict[str, Any], task_key: str) -> dict[str, Any]:
+    selected_by = str(entry.get("selected_by", ""))
+    path = str(entry.get("path", ""))
+    source_kind = "unknown"
+    source_ref = selected_by or path or "unknown"
+    source_refs = [path] if path else ["unknown"]
+    if selected_by.startswith("control_plane:active_decision"):
+        source_kind = "control_plane_active_decision"
+        source_ref = ACTIVE_DECISION_GLOB
+    elif selected_by.startswith("control_plane"):
+        source_kind = "control_plane_required"
+        source_ref = "control_plane"
+    elif selected_by.startswith("task:"):
+        source_kind = "task_pattern_match"
+        parts = selected_by.split(":", 2)
+        source_ref = parts[2] if len(parts) == 3 else f"task:{task_key}"
+        if source_ref and source_ref not in source_refs:
+            source_refs.append(source_ref)
+
+    return {
+        "source_kind": source_kind,
+        "source_ref": source_ref,
+        "source_refs": source_refs,
+    }
+
+
 def _score_task_entry(
     project_dir: Path,
     entry: dict[str, Any],
@@ -286,6 +340,7 @@ def select_task_files(
         "retrieval_profile": None,  # populated by build_bundle
         "weighting_mode": weighting_mode,
         "weights": dict(weight_map),
+        "confidence_bounds": dict(CONTEXT_LOAD_CONFIDENCE_BOUNDS),
         "tie_break_order": list(CONTEXT_LOAD_TIE_BREAK_ORDER),
         "query_tokens": task_tokens,
         "candidate_count": len(ranked),
@@ -341,14 +396,24 @@ def build_bundle(
             continue
         if truncated:
             truncated_count += 1
+        selected_by = str(entry.get("selected_by", ""))
+        rank = entry.get("rank")
+        combined_score = entry.get("combined_score")
+        confidence = entry.get("confidence")
+        score_breakdown = entry.get("score_breakdown")
+        if score_breakdown is None or combined_score is None or confidence is None:
+            combined_score, confidence, score_breakdown = _default_control_plane_score(selected_by)
+        confidence = _clamp_confidence(float(confidence))
+        provenance = _entry_provenance(entry, task_key)
         excerpts.append(
             {
                 "path": entry["path"],
                 "selected_by": entry["selected_by"],
-                "rank": entry.get("rank"),
-                "combined_score": entry.get("combined_score"),
-                "confidence": entry.get("confidence"),
-                "score_breakdown": entry.get("score_breakdown"),
+                "rank": rank,
+                "combined_score": round(float(combined_score), 6),
+                "confidence": confidence,
+                "score_breakdown": score_breakdown,
+                "provenance": provenance,
                 "truncated": truncated,
                 "excerpt": excerpt,
             }

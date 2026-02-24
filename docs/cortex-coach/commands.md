@@ -390,6 +390,11 @@ Deterministic ranking contract:
 3. `pattern_priority_asc`
 4. `path_asc`
 
+Context entry metadata contract:
+- each selected file emits `provenance.source_kind`, `provenance.source_ref`, `provenance.source_refs`
+- each selected file emits bounded confidence (`0.0` to `1.0`) and score breakdown metadata
+- ordering remains deterministic across repeated runs for identical inputs/repo state
+
 Supported retrieval profiles:
 - `small`
 - `medium`

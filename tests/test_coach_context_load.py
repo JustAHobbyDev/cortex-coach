@@ -36,8 +36,15 @@ def test_context_load_fallback_metadata(initialized_project: Path) -> None:
         "pattern_priority_asc",
         "path_asc",
     ]
+    assert payload["ranking"]["confidence_bounds"] == {"min": 0.0, "max": 1.0}
     assert payload["selected_file_count"] >= 1
     assert any(f["selected_by"] == "control_plane" for f in payload["files"])
+    for item in payload["files"]:
+        assert 0.0 <= float(item["confidence"]) <= 1.0
+        prov = item["provenance"]
+        assert isinstance(prov["source_kind"], str) and prov["source_kind"]
+        assert isinstance(prov["source_ref"], str) and prov["source_ref"]
+        assert isinstance(prov["source_refs"], list) and len(prov["source_refs"]) >= 1
 
 
 def test_context_load_ranking_is_deterministic_across_runs(initialized_project: Path) -> None:
@@ -115,6 +122,9 @@ def test_context_load_ranking_tie_break_falls_back_to_path_order(initialized_pro
     assert isinstance(tie_entry["rank"], int)
     assert isinstance(tie_entry["combined_score"], float)
     assert isinstance(tie_entry["confidence"], float)
+    assert 0.0 <= tie_entry["confidence"] <= 1.0
+    assert tie_entry["provenance"]["source_kind"] == "task_pattern_match"
+    assert "policies/aaa_governance_rank_tie.md" in tie_entry["provenance"]["source_refs"]
     assert set(tie_entry["score_breakdown"].keys()) == {
         "lexical_score",
         "evidence_score",
@@ -185,6 +195,10 @@ def test_context_load_weighting_mode_can_change_ranking(initialized_project: Pat
     assert payload_uniform["weighting_mode"] == "uniform"
     assert payload_bias["weighting_mode"] == "evidence_outcome_bias"
     assert payload_uniform["ranking"]["weights"] != payload_bias["ranking"]["weights"]
+    for payload in (payload_uniform, payload_bias):
+        for item in payload["files"]:
+            assert 0.0 <= float(item["confidence"]) <= 1.0
+            assert "provenance" in item
 
 
 def test_context_load_invalid_weighting_mode_fails_argument_validation(initialized_project: Path) -> None:
