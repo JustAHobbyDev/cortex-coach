@@ -63,7 +63,8 @@ jobs:
           chmod +x scripts/ci_validate_docs_and_json_v0.sh
           chmod +x scripts/quality_gate_v0.sh
           chmod +x scripts/quality_gate_ci_v0.sh
-          ./scripts/quality_gate_ci_v0.sh
+          chmod +x scripts/quality_gate_ci_full_v0.sh
+          ./scripts/quality_gate_ci_full_v0.sh
 
   publish-release:
     runs-on: ubuntu-latest

@@ -562,3 +562,9 @@ Fallback:
 ```bash
 ./scripts/quality_gate_ci_v0.sh
 ```
+
+Full matrix fallback:
+
+```bash
+./scripts/quality_gate_ci_full_v0.sh
+```

@@ -25,3 +25,9 @@ uv run python3 cortex_coach/coach.py --help
 ```bash
 ./scripts/quality_gate_ci_v0.sh
 ```
+
+Release/full matrix:
+
+```bash
+./scripts/quality_gate_ci_full_v0.sh
+```
