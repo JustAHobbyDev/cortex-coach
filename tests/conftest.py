@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,9 +35,7 @@ def init_git_repo(path: Path) -> None:
     run_cmd(["git", "config", "user.name", "Cortex Test"], cwd=path)
 
 
-@pytest.fixture()
-def initialized_project(tmp_path: Path) -> Path:
-    project_dir = tmp_path / "proj"
+def bootstrap_initialized_project(project_dir: Path) -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
     init_git_repo(project_dir)
 
@@ -56,6 +55,20 @@ def initialized_project(tmp_path: Path) -> Path:
     # Baseline commit so dirty checks are meaningful.
     run_cmd(["git", "add", "."], cwd=project_dir)
     run_cmd(["git", "commit", "-m", "baseline"], cwd=project_dir)
+
+
+@pytest.fixture(scope="session")
+def initialized_project_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    template_root = tmp_path_factory.mktemp("initialized_project_template")
+    project_dir = template_root / "proj"
+    bootstrap_initialized_project(project_dir)
+    return project_dir
+
+
+@pytest.fixture()
+def initialized_project(tmp_path: Path, initialized_project_template: Path) -> Path:
+    project_dir = tmp_path / "proj"
+    shutil.copytree(initialized_project_template, project_dir)
     return project_dir
 
 
